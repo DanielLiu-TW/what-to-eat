@@ -1,5 +1,5 @@
 // 離線快取：App 本體走快取優先，其他請求（例如查附近店家）直接走網路
-const CACHE = "wte-v3";
+const CACHE = "wte-v4";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "data.js", "reviews.js", "import.js", "manifest.json", "icon.svg", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", (e) => {

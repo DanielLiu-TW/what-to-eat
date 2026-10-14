@@ -86,7 +86,7 @@ async function googleNearbyOnce(lat, lon, radius, rankPreference) {
     headers: {
       "Content-Type": "application/json",
       "X-Goog-Api-Key": getKeys().google,
-      "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.primaryType,places.formattedAddress,places.googleMapsUri,places.rating,places.userRatingCount,places.priceLevel,places.priceRange",
+      "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.primaryType,places.formattedAddress,places.googleMapsUri,places.rating,places.userRatingCount,places.priceLevel,places.priceRange,places.currentOpeningHours.openNow",
     },
     body: JSON.stringify({
       includedTypes: ["restaurant", "meal_takeaway", "cafe"],
@@ -105,6 +105,7 @@ async function googleNearbyOnce(lat, lon, radius, rankPreference) {
     name: g.displayName?.text, lat: g.location?.latitude, lon: g.location?.longitude,
     cuisine: googleCuisine(g.primaryType), amenity: "restaurant", addr: g.formattedAddress || "",
     rating: g.rating, count: g.userRatingCount, tier: googleTier(g), mapsUrl: g.googleMapsUri,
+    openNow: g.currentOpeningHours?.openNow,
   }));
 }
 
@@ -141,38 +142,121 @@ async function googleLookup(p) {
   }
 }
 
-// ---------- Gemini 摘要 ----------
-const SUMMARY_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    good: { type: "ARRAY", items: { type: "STRING" }, description: "好評重點，最多 3 點" },
-    bad: { type: "ARRAY", items: { type: "STRING" }, description: "負評重點，最多 3 點；沒有就給空陣列" },
-  },
-  required: ["good", "bad"],
-};
+// ---------- Gemini：餐廳情報（評價重點、實用資訊、菜單價格） ----------
+const INTEL_RULES = `你幫使用者決定要不要去一家餐廳。只輸出一個 JSON 物件，不要有其他文字，格式：
+{
+  "good": ["好評重點，最多 3 點"],
+  "bad": ["負評重點，最多 3 點，沒有就給空陣列"],
+  "tips": ["實用資訊，最多 2 點，例如排隊時間、要不要訂位、付款方式、低消、停車"],
+  "menu": [{"name": "品項或套餐名稱", "price": 220, "note": "內容或份量，可留空", "source": "來源名稱", "date": "YYYY-MM-DD 或 YYYY-MM"}],
+  "per_person": 250,
+  "per_person_basis": "這個人均花費是根據什麼估的"
+}
+規則：
+1. 好評、負評、實用資訊都要具體，寫出實際的菜名、口味、份量、等待時間、價格或環境狀況，每點 30 字以內。
+   好的例子：「牛肉麵湯頭偏甜、牛腱軟嫩」「週末晚上排隊約 40 分鐘」「小菜一盤 40 元偏貴」「只收現金」。
+   不要寫「好吃」「服務好」「CP 值高」這種沒有細節的話。
+2. menu 最多 6 項，招牌餐點和套餐組合優先。price 是新台幣數字。
+3. 價格只能來自你找到的來源或提供的評論，絕對不能猜。找不到價格的品項不要列。
+4. 每個價格都要寫 source（例如 Uber Eats、foodpanda、店家官網、部落格名稱、Google 評論）和 date（那份菜單或文章、評論的日期；真的不知道就寫 "未知"）。同一品項有多個來源時用最新的。
+5. 只寫這一家店（看地址）的資訊，不要跟同名的其他分店搞混；連鎖店用官方菜單時在 note 註明「官方價格，各店可能不同」。
+6. per_person 是一般一個人吃一餐大約花多少錢，沒有根據就給 null。`;
 
-async function geminiSummarize(name, reviews) {
-  const text = reviews
-    .map((r, i) => `評論 ${i + 1}（${r.rating ?? "?"} 星）：${(r.text?.text || r.originalText?.text || "").slice(0, 800)}`)
-    .join("\n\n");
+function reviewDate(r) {
+  return (r.publishTime || "").slice(0, 10) || r.relativePublishTimeDescription || "日期不明";
+}
+
+function buildIntelPrompt(name, g, reviews, withSearch) {
+  const lines = [
+    `餐廳：${name}`,
+    g.formattedAddress ? `地址：${g.formattedAddress}` : "",
+    g.rating ? `Google 評分：${g.rating}（${g.userRatingCount || 0} 則評論）` : "",
+    g.reviewSummary?.text?.text ? `Google 的評論摘要：${g.reviewSummary.text.text}` : "",
+    "",
+    "最新的幾則 Google 評論：",
+    ...reviews.map((r, i) => `評論 ${i + 1}（${r.rating ?? "?"} 星，${reviewDate(r)}）：${(r.text?.text || r.originalText?.text || "").slice(0, 800)}`),
+    "",
+    withSearch
+      ? "請用 Google 搜尋找這家店的菜單和價格（外送平台、店家官網或粉專、近期的部落格或新聞），以及更多實際評價，再整理。"
+      : "沒有辦法上網搜尋，只能根據上面的評論整理；評論裡沒提到價格就讓 menu 留空。",
+  ];
+  return lines.filter((l, i) => l !== "" || i > 0).join("\n");
+}
+
+async function geminiCall(body) {
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": getKeys().gemini },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: "你幫使用者快速判斷要不要去一家餐廳。根據提供的 Google 評論，用繁體中文整理好評和負評的重點。每點 20 字以內，具體描述（例如「湯頭濃郁」、「假日要排 30 分鐘」），不要空泛的形容。只根據評論內容，不要自己編造。" }] },
-      contents: [{ role: "user", parts: [{ text: `餐廳：${name}\n\n${text}` }] }],
-      generationConfig: { responseMimeType: "application/json", responseSchema: SUMMARY_SCHEMA },
-    }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error?.message || "HTTP " + res.status);
   }
-  const data = await res.json();
-  const out = (data.candidates?.[0]?.content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join("");
-  if (!out) return null;
-  const json = JSON.parse(out.replace(/^```(?:json)?\s*|\s*```$/g, ""));
-  return { good: (json.good || []).slice(0, 3), bad: (json.bad || []).slice(0, 3) };
+  return res.json();
+}
+
+function parseJSONLoose(text) {
+  const a = text.indexOf("{"), b = text.lastIndexOf("}");
+  if (a < 0 || b <= a) throw new Error("AI 回傳的格式不正確");
+  return JSON.parse(text.slice(a, b + 1));
+}
+
+function cleanList(arr, n) {
+  return (Array.isArray(arr) ? arr : []).map((s) => String(s).trim()).filter(Boolean).slice(0, n);
+}
+
+function cleanMenu(arr) {
+  return (Array.isArray(arr) ? arr : [])
+    .map((m) => ({
+      name: String(m.name || "").trim(),
+      price: Math.round(Number(m.price)),
+      note: String(m.note || "").trim(),
+      source: String(m.source || "").trim() || "來源不明",
+      date: String(m.date || "").trim() || "未知",
+    }))
+    .filter((m) => m.name && m.price > 0)
+    .slice(0, 6);
+}
+
+// 菜單日期：取有標日期的來源中最新的一個
+function latestDate(menu) {
+  const ds = menu.map((m) => m.date).filter((d) => /^\d{4}-\d{2}/.test(d)).sort();
+  return ds.length ? ds[ds.length - 1] : null;
+}
+
+async function geminiIntel(name, g, reviews) {
+  const make = (withSearch) => ({
+    systemInstruction: { parts: [{ text: INTEL_RULES }] },
+    contents: [{ role: "user", parts: [{ text: buildIntelPrompt(name, g, reviews, withSearch) }] }],
+    ...(withSearch ? { tools: [{ google_search: {} }] } : { generationConfig: { responseMimeType: "application/json" } }),
+  });
+  let data, searched = true, searchError = null;
+  try {
+    data = await geminiCall(make(true));
+  } catch (e) {
+    // 免費方案不能用 Google 搜尋，就退回只看評論
+    console.warn("Gemini 搜尋失敗，改成只用評論", e);
+    searched = false;
+    searchError = e.message;
+    data = await geminiCall(make(false));
+  }
+  const cand = data.candidates?.[0];
+  const text = (cand?.content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join("");
+  if (!text) return null;
+  const json = parseJSONLoose(text);
+  const meta = cand.groundingMetadata || {};
+  const sources = (meta.groundingChunks || []).map((c) => c.web).filter((w) => w?.uri).slice(0, 5).map((w) => ({ uri: w.uri, title: w.title || w.uri }));
+  const menu = cleanMenu(json.menu);
+  return {
+    good: cleanList(json.good, 3), bad: cleanList(json.bad, 3), tips: cleanList(json.tips, 2),
+    menu, menuAsOf: latestDate(menu),
+    perPerson: Number(json.per_person) > 0 ? Math.round(Number(json.per_person)) : null,
+    perPersonBasis: String(json.per_person_basis || "").trim(),
+    searched, searchError, sources,
+    // Google 規定使用搜尋結果時要顯示它提供的搜尋建議
+    searchHtml: meta.searchEntryPoint?.renderedContent || "",
+  };
 }
 
 // 沒有 Gemini key 時：直接節錄最高分與最低分的評論
@@ -183,16 +267,17 @@ function excerptSummary(reviews) {
   const clip = (r) => { const t = r.text.text.replace(/\s+/g, " ").trim(); return t.length > 70 ? t.slice(0, 70) + "…" : t; };
   const best = sorted[0], worst = sorted[sorted.length - 1];
   return {
-    good: best.rating >= 4 ? [clip(best)] : [],
-    bad: worst !== best && worst.rating <= 3 ? [clip(worst)] : [],
+    good: best.rating >= 4 ? [`${clip(best)}（${reviewDate(best)}）`] : [],
+    bad: worst !== best && worst.rating <= 3 ? [`${clip(worst)}（${reviewDate(worst)}）`] : [],
   };
 }
 
 // ---------- 對外：取得一家店的評價資訊 ----------
+const CACHE_VERSION = "v2:";
 const inflight = new Map();
 
 function getPlaceInfo(p) {
-  const key = p.id || p.name;
+  const key = CACHE_VERSION + (p.id || p.name);
   const cached = cacheGet(key);
   if (cached) return Promise.resolve(cached);
   if (!inflight.has(key)) {
@@ -207,19 +292,22 @@ function getPlaceInfo(p) {
           priceLevel: g.priceLevel, priceRange: g.priceRange,
           openNow: g.currentOpeningHours?.openNow,
           mapsUrl: g.googleMapsUri,
+          fetchedAt: Date.now(),
         };
-        if (g.reviewSummary?.text?.text) {
+        let intel = null;
+        if (getKeys().gemini) {
+          try { intel = await geminiIntel(info.name || p.name, g, reviews); }
+          catch (e) { console.warn("Gemini 整理失敗", e); info.aiError = e.message; }
+        }
+        if (intel) {
+          Object.assign(info, intel);
+          info.source = intel.searched ? "Gemini 整理自 Google 評論與網路搜尋" : "Gemini 整理自 Google 評論";
+        } else if (g.reviewSummary?.text?.text) {
           info.summaryText = g.reviewSummary.text.text;
           info.source = "Google 評論摘要";
-        }
-        if (!info.summaryText && reviews.length) {
-          let s = null;
-          if (getKeys().gemini) {
-            try { s = await geminiSummarize(info.name || p.name, reviews); info.source = "Gemini 整理自 Google 評論"; }
-            catch (e) { console.warn("Gemini 摘要失敗", e); }
-          }
-          if (!s) { s = excerptSummary(reviews); info.source = "Google 評論節錄"; }
-          if (s) Object.assign(info, s);
+        } else if (reviews.length) {
+          Object.assign(info, excerptSummary(reviews) || {});
+          info.source = "Google 評論節錄";
         }
         cacheSet(key, info);
         return info;
@@ -246,6 +334,32 @@ function priceText(info) {
   return PRICE_LEVEL[info.priceLevel] || "";
 }
 
+function dateText(d) {
+  const m = /^(\d{4})-(\d{2})(?:-(\d{2}))?/.exec(d || "");
+  if (!m) return d || "日期不明";
+  return m[3] ? `${m[1]}/${Number(m[2])}/${Number(m[3])}` : `${m[1]} 年 ${Number(m[2])} 月`;
+}
+
+function listBlock(cls, head, items) {
+  if (!items?.length) return "";
+  return `<div class="review ${cls}"><div class="rv-head">${head}</div><ul>${items.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>`;
+}
+
+function menuHTML(info) {
+  if (!info.menu?.length) {
+    if (!info.good && !info.bad) return "";
+    return `<div class="menu-box"><div class="mi-src">🍽️ 找不到有標價格的菜單${info.searched === false ? "（目前只能看評論，開啟 Gemini 付費方案後可以上網搜尋菜單）" : ""}</div></div>`;
+  }
+  const asOf = info.menuAsOf ? `參考 ${dateText(info.menuAsOf)} 的資料` : "資料日期不明";
+  return `<details class="menu-box" open>
+    <summary>🍽️ 餐點參考價 <span class="menu-asof">（${esc(asOf)}，現場可能已調整）</span></summary>
+    ${info.menu.map((m) => `<div class="menu-item">
+      <div class="mi-main">${esc(m.name)}${m.note ? `<div class="mi-note">${esc(m.note)}</div>` : ""}<div class="mi-src">${esc(m.source)} · ${esc(dateText(m.date))}</div></div>
+      <div class="mi-price">NT$${m.price}</div>
+    </div>`).join("")}
+  </details>`;
+}
+
 function reviewHTML(info) {
   if (info.notFound) return `<div class="gplace-meta">Google 上找不到這家店</div>`;
   const meta = [];
@@ -255,22 +369,34 @@ function reviewHTML(info) {
   if (info.openNow === true) meta.push(`<span class="open">營業中</span>`);
   if (info.openNow === false) meta.push(`<span class="closed">休息中</span>`);
   let html = `<div class="gplace-meta">${meta.join(" · ")}</div>`;
-  if (info.summaryText) {
-    html += `<div class="review">${esc(info.summaryText)}</div>`;
-  } else {
-    if (info.good?.length) html += `<div class="review good"><div class="rv-head">👍 好評</div><ul>${info.good.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>`;
-    if (info.bad?.length) html += `<div class="review bad"><div class="rv-head">👎 負評</div><ul>${info.bad.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>`;
+  if (info.perPerson) {
+    html += `<div class="per-person">💰 一人約 <b>NT$${info.perPerson}</b>${info.perPersonBasis ? `<span class="muted small">（${esc(info.perPersonBasis)}）</span>` : ""}</div>`;
   }
-  if (info.source && (info.summaryText || info.good?.length || info.bad?.length)) html += `<div class="review-src">${esc(info.source)}</div>`;
+  if (info.summaryText) html += `<div class="review">${esc(info.summaryText)}</div>`;
+  html += listBlock("good", "👍 好評", info.good);
+  html += listBlock("bad", "👎 負評", info.bad);
+  html += listBlock("tip", "💡 去之前知道", info.tips);
+  html += menuHTML(info);
+  if (info.source) html += `<div class="review-src">${esc(info.source)}${info.fetchedAt ? `・${esc(dateText(new Date(info.fetchedAt).toISOString().slice(0, 10)))} 查詢` : ""}</div>`;
+  if (info.aiError) html += `<div class="review-src">⚠️ AI 整理失敗：${esc(info.aiError)}</div>`;
+  if (info.sources?.length) {
+    html += `<div class="sources">來源：${info.sources.map((s) => `<a href="${esc(s.uri)}" target="_blank" rel="noopener">${esc(s.title)}</a>`).join("、")}</div>`;
+  }
+  if (info.searchHtml) html += `<iframe class="search-suggest" sandbox="allow-popups allow-popups-to-escape-sandbox" title="Google 搜尋建議"></iframe>`;
   return html;
 }
 
 // 把評價填進卡片裡的 .gplace 區塊
 function fillReview(el, p) {
   if (!el || !hasGoogleKey()) return;
-  el.innerHTML = `<div class="gplace-meta">⏳ 讀取 Google 評價…</div>`;
+  el.innerHTML = `<div class="gplace-meta">⏳ 讀取評價${getKeys().gemini ? "、搜尋菜單（約 10 秒）" : ""}…</div>`;
   getPlaceInfo(p)
-    .then((info) => { if (el.isConnected) el.innerHTML = reviewHTML(info); })
+    .then((info) => {
+      if (!el.isConnected) return;
+      el.innerHTML = reviewHTML(info);
+      const frame = el.querySelector(".search-suggest");
+      if (frame) frame.srcdoc = info.searchHtml;
+    })
     .catch((e) => { if (el.isConnected) el.innerHTML = `<div class="gplace-meta">⚠️ 讀取評價失敗：${esc(e.message)}</div>`; });
 }
 

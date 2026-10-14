@@ -57,24 +57,36 @@
 
     <!-- 附近 -->
     <section id="tab-nearby" class="tab">
-      <div class="panel">
-        <div class="field-label">範圍</div>
-        <div class="seg" id="radius">
-          <button data-v="400">400m</button>
-          <button data-v="800" class="on">800m</button>
-          <button data-v="1500">1.5km</button>
-          <button data-v="3000">3km</button>
-        </div>
-        <input id="nearby-filter" type="search" placeholder="篩選：例如 拉麵、咖哩、ramen">
-        <label class="row-check"><input type="checkbox" id="hide-visited" checked> 隱藏吃過的店</label>
+      <div class="nb-search">
+        <input id="nearby-filter" type="search" placeholder="🔍 搜尋店名或料理" autocomplete="off">
+        <button class="icon-btn" id="locate-btn" aria-label="重新定位">📍</button>
       </div>
-      <div class="row-actions">
-        <button class="big-btn" id="locate-btn">📍 找附近的店</button>
+      <div class="chip-bar" id="nb-chips">
+        <span class="chip chip-select"><select id="nb-radius" aria-label="範圍">
+          <option value="400">400m 內</option>
+          <option value="800">800m 內</option>
+          <option value="1500">1.5km 內</option>
+          <option value="3000">3km 內</option>
+        </select></span>
+        <span class="chip chip-select"><select id="nb-sort" aria-label="排序">
+          <option value="distance">離我最近</option>
+          <option value="rating">評分最高</option>
+          <option value="random">隨機排序</option>
+        </select></span>
+        <span class="chip chip-select"><select id="nb-price" aria-label="價位">
+          <option value="0">價位不限</option>
+          <option value="1">$ 平價</option>
+          <option value="2">$$ 以內</option>
+        </select></span>
+        <button class="chip" data-toggle="fresh">沒去過</button>
+        <button class="chip" data-toggle="open">營業中</button>
+        <button class="chip" data-toggle="rating">★ 4 以上</button>
       </div>
-      <p id="nearby-status" class="muted center"></p>
-      <div id="nearby-actions" class="row-actions hidden">
-        <button class="ghost" id="nearby-random-btn">🎲 隨機抽 3 家</button>
-        <button class="ghost" id="nearby-all-btn">📋 顯示全部</button>
+      <div class="chip-bar" id="nb-cats"></div>
+      <div class="nb-head">
+        <span id="nearby-status" class="muted small"></span>
+        <button class="chip hidden" id="nearby-all-btn">📋 全部</button>
+        <button class="chip accent hidden" id="nearby-random-btn">🎲 抽 3 家</button>
       </div>
       <div id="nearby-list" class="cards"></div>
     </section>

@@ -312,11 +312,12 @@ $("#pick-results").addEventListener("click", (e) => {
     pickRejected = new Set();
     renderPick();
   } else if (act === "nearby") {
-    $("#nearby-filter").value = x.item.name;
+    nbFilter.cat = x.item.id;
+    nbFilter.q = "";
+    $("#nearby-filter").value = "";
     nearbyRandom = null;
     switchTab("nearby");
     if (nearbyPlaces) renderNearby();
-    else locate();
   }
 });
 
@@ -449,41 +450,65 @@ async function loadNearby(onStatus = () => {}) {
   renderNearby();
 }
 
+let nearbyLoading = false;
+
 async function locate() {
+  if (nearbyLoading) return;
+  nearbyLoading = true;
   const btn = $("#locate-btn");
   const status = $("#nearby-status");
   btn.disabled = true;
+  $("#nearby-list").innerHTML = "";
   try {
     await loadNearby((msg) => { status.textContent = msg; });
   } catch (e) {
     status.textContent = "⚠️ " + e.message;
   } finally {
     btn.disabled = false;
+    nearbyLoading = false;
   }
 }
 
 function savePlaceFromNearby(p) {
   if (state.places.some((x) => x.name === p.name)) return toast("已經在口袋名單裡了");
-  openEdit("place", null, { name: p.name, categoryId: p.cat?.id || "", price: p.cat?.price || 2, note: p.addr, status: "want" });
+  openEdit("place", null, { name: p.name, categoryId: p.cat?.id || "", price: p.tier || p.cat?.price || 2, note: p.addr, status: "want" });
+}
+
+// 篩選條件（「沒去過」記在設定裡，其他只在這次使用）
+const nbFilter = { q: "", cat: null, sort: "distance", price: 0, open: false, rating: false };
+
+let visitedCache = null;
+function visitedNames() {
+  return (visitedCache ||= new Set(state.logs.map((l) => l.name)));
+}
+
+function nbMatches(p, { skipCat = false } = {}) {
+  const f = nbFilter;
+  if (state.settings.hideVisited && visitedNames().has(p.name)) return false;
+  if (f.price) {
+    const tier = p.tier || p.cat?.price;
+    if (tier && tier > f.price) return false;
+  }
+  if (f.open && p.openNow !== true) return false;
+  if (f.rating && !(p.rating >= 4)) return false;
+  if (f.q) {
+    const q = f.q.toLowerCase();
+    if (![p.name, p.cuisine, p.cat?.name || ""].some((s) => s.toLowerCase().includes(q))) return false;
+  }
+  if (!skipCat && f.cat) {
+    if (f.cat === "_other" ? p.cat : p.cat?.id !== f.cat) return false;
+  }
+  return true;
 }
 
 function nearbyFiltered() {
   if (!nearbyPlaces) return [];
-  const f = $("#nearby-filter").value.trim();
-  const fl = f.toLowerCase();
-  const cat = f && allCategories({ includeHidden: true }).find((c) => c.name === f);
-  const visited = new Set(state.logs.map((l) => l.name));
-  return nearbyPlaces.filter((p) => {
-    if (state.settings.hideVisited && visited.has(p.name)) return false;
-    if (!f) return true;
-    if (cat) {
-      if (p.cat?.id === cat.id) return true;
-      if ((cat.kw || []).some((k) => p.name.includes(k))) return true;
-      const cu = p.cuisine.toLowerCase().split(/[;,]\s*/);
-      if ((cat.osm || []).some((o) => cu.includes(o))) return true;
-    }
-    return p.name.toLowerCase().includes(fl) || p.cuisine.toLowerCase().includes(fl) || (p.cat?.name || "").includes(f);
-  });
+  visitedCache = null;
+  const items = nearbyPlaces.filter((p) => nbMatches(p));
+  if (nbFilter.sort === "rating") items.sort((a, b) => (b.rating || 0) - (a.rating || 0) || a.dist - b.dist);
+  else if (nbFilter.sort === "random") items.sort((a, b) => a.rnd - b.rnd);
+  else items.sort((a, b) => a.dist - b.dist);
+  return items;
 }
 
 function nearbyMapsUrl(p) {
@@ -491,17 +516,52 @@ function nearbyMapsUrl(p) {
   return mapsSearchUrl(p.addr ? `${p.name} ${p.addr}` : `${p.lat},${p.lon}`);
 }
 
+function renderNearbyChips() {
+  visitedCache = null;
+  // 沒有資料的條件（例如 OpenStreetMap 沒有評分）就不顯示
+  const has = (k) => !!nearbyPlaces?.some((p) => p[k] != null);
+  $$("#nb-chips [data-toggle]").forEach((b) => {
+    const k = b.dataset.toggle;
+    b.classList.toggle("on", k === "fresh" ? state.settings.hideVisited : nbFilter[k]);
+    if (k === "open") b.classList.toggle("hidden", !has("openNow"));
+    if (k === "rating") b.classList.toggle("hidden", !has("rating"));
+  });
+  $('#nb-sort option[value="rating"]').hidden = !has("rating");
+  $("#nb-sort").parentElement.classList.toggle("on", nbFilter.sort !== "distance");
+  $("#nb-price").parentElement.classList.toggle("on", nbFilter.price > 0);
+
+  // 類型標籤：依目前其他條件下的店家數排序
+  const box = $("#nb-cats");
+  if (!nearbyPlaces?.length) { box.innerHTML = ""; return; }
+  const counts = new Map();
+  let other = 0, total = 0;
+  for (const p of nearbyPlaces) {
+    if (!nbMatches(p, { skipCat: true })) continue;
+    total++;
+    if (p.cat) counts.set(p.cat.id, (counts.get(p.cat.id) || 0) + 1);
+    else other++;
+  }
+  // 從「幫我選」帶過來的類型就算附近沒有也要顯示，才知道是在篩它
+  if (nbFilter.cat && nbFilter.cat !== "_other" && !counts.has(nbFilter.cat)) counts.set(nbFilter.cat, 0);
+  const chip = (id, label, n) =>
+    `<button class="chip ${nbFilter.cat === id ? "on" : ""}" data-cat="${esc(id ?? "")}">${esc(label)} <span class="cnt">${n}</span></button>`;
+  box.innerHTML =
+    chip(null, "全部", total) +
+    [...counts].sort((a, b) => b[1] - a[1]).map(([id, n]) => { const c = categoryById(id); return chip(id, `${c.emoji} ${c.name}`, n); }).join("") +
+    (other ? chip("_other", "其他", other) : "");
+}
+
 function renderNearby() {
   const status = $("#nearby-status");
   const list = $("#nearby-list");
   if (!nearbyPlaces) return;
+  renderNearbyChips();
   const items = nearbyFiltered();
-  const radius = state.settings.radius;
-  const rText = radius >= 1000 ? radius / 1000 + "km" : radius + "m";
   status.textContent = nearbyPlaces.length
-    ? `${rText} 內找到 ${nearbyPlaces.length} 家，符合條件 ${items.length} 家`
-    : `${rText} 內沒有找到店家，試試放大範圍`;
-  $("#nearby-actions").classList.toggle("hidden", !items.length);
+    ? (nearbyRandom ? `從 ${items.length} 家裡抽出 ${Math.min(3, items.length)} 家` : `符合 ${items.length} 家`)
+    : "這個範圍內沒有找到店家，試試放大範圍";
+  $("#nearby-random-btn").classList.toggle("hidden", !items.length);
+  $("#nearby-all-btn").classList.toggle("hidden", !nearbyRandom);
 
   let shown = items;
   if (nearbyRandom) {
@@ -509,29 +569,32 @@ function renderNearby() {
     shown = nearbyRandom.filter((p) => ids.has(p.id));
   }
   if (!items.length && nearbyPlaces.length) {
-    list.innerHTML = `<div class="empty">沒有符合的店，試試清除篩選或放大範圍</div>`;
+    list.innerHTML = `<div class="empty">沒有符合的店，試試取消一些條件</div>`;
     return;
   }
-  const showReviewBtn = hasGoogleKey() && !nearbyRandom;
+  const showInfoBtn = hasGoogleKey() && !nearbyRandom;
+  const visited = visitedNames();
   list.innerHTML = shown.slice(0, 80).map((p) => {
-    const meta = [p.cat ? `${p.cat.emoji} ${p.cat.name}` : AMENITY_LABEL[p.amenity], p.dist + "m"].filter(Boolean);
+    const meta = [p.cat ? `${p.cat.emoji} ${p.cat.name}` : AMENITY_LABEL[p.amenity] || "餐廳", p.dist + "m"];
     if (!p.cat && p.cuisine && !p.gid) meta.splice(1, 0, p.cuisine);
     if (p.rating) meta.push(`★ ${p.rating.toFixed(1)}`);
     if (p.tier) meta.push(PRICE_LABEL[p.tier]);
+    if (p.openNow === true) meta.push("營業中");
+    if (p.openNow === false) meta.push("休息中");
     return `<div class="card" data-id="${esc(p.id)}">
       <div class="card-head">
-        <div class="card-title">${esc(p.name)}<div class="card-meta">${esc(meta.join(" · "))}</div></div>
+        <div class="card-title">${esc(p.name)}${visited.has(p.name) ? '<span class="badge been">吃過</span>' : ""}<div class="card-meta">${esc(meta.join(" · "))}</div></div>
       </div>
       <div class="gplace"></div>
       <div class="card-btns">
         <button class="go" data-act="eat">✓ 就吃這家</button>
         <a href="${esc(nearbyMapsUrl(p))}" target="_blank" rel="noopener">🗺️ 地圖</a>
         <button data-act="save">＋ 口袋</button>
-        ${showReviewBtn ? `<button data-act="review">💬 評價</button>` : ""}
+        ${showInfoBtn ? `<button data-act="review">💬 評價菜單</button>` : ""}
       </div>
     </div>`;
   }).join("");
-  // 隨機抽出的 3 家自動載入評價；完整清單則按「評價」才載入，避免浪費 API 額度
+  // 抽出的 3 家自動載入評價與菜單；完整清單則按按鈕才載入，避免浪費 API 額度
   if (nearbyRandom) shown.forEach((p) => fillReview(list.querySelector(`.card[data-id="${CSS.escape(p.id)}"] .gplace`), p));
 }
 
@@ -551,21 +614,39 @@ $("#nearby-list").addEventListener("click", (e) => {
   }
 });
 
-$("#locate-btn").addEventListener("click", locate);
-$("#nearby-filter").addEventListener("input", () => { nearbyRandom = null; renderNearby(); });
-$("#hide-visited").addEventListener("change", (e) => {
-  state.settings.hideVisited = e.target.checked;
-  save();
+function updateNearby() {
+  nearbyRandom = null;
   renderNearby();
-});
-$("#radius").addEventListener("click", (e) => {
-  const b = e.target.closest("button");
+}
+
+$("#locate-btn").addEventListener("click", locate);
+$("#nearby-filter").addEventListener("input", (e) => { nbFilter.q = e.target.value.trim(); updateNearby(); });
+$("#nb-chips").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-toggle]");
   if (!b) return;
-  state.settings.radius = Number(b.dataset.v);
-  setSeg("#radius", b.dataset.v);
+  const k = b.dataset.toggle;
+  if (k === "fresh") { state.settings.hideVisited = !state.settings.hideVisited; save(); }
+  else nbFilter[k] = !nbFilter[k];
+  updateNearby();
+});
+$("#nb-cats").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-cat]");
+  if (!b) return;
+  const id = b.dataset.cat || null;
+  nbFilter.cat = nbFilter.cat === id ? null : id;
+  updateNearby();
+});
+$("#nb-radius").addEventListener("change", (e) => {
+  state.settings.radius = Number(e.target.value);
   save();
   if (nearbyPlaces) locate();
 });
+$("#nb-sort").addEventListener("change", (e) => {
+  nbFilter.sort = e.target.value;
+  if (nbFilter.sort === "random") nearbyPlaces?.forEach((p) => { p.rnd = Math.random(); });
+  updateNearby();
+});
+$("#nb-price").addEventListener("change", (e) => { nbFilter.price = Number(e.target.value); updateNearby(); });
 $("#nearby-random-btn").addEventListener("click", () => {
   const items = [...nearbyFiltered()];
   for (let i = items.length - 1; i > 0; i--) {
@@ -574,8 +655,9 @@ $("#nearby-random-btn").addEventListener("click", () => {
   }
   nearbyRandom = items.slice(0, 3);
   renderNearby();
+  window.scrollTo(0, 0);
 });
-$("#nearby-all-btn").addEventListener("click", () => { nearbyRandom = null; renderNearby(); });
+$("#nearby-all-btn").addEventListener("click", updateNearby);
 
 // ---------- 口袋名單 / 類型管理 ----------
 let listMode = "place";
@@ -782,6 +864,8 @@ function switchTab(tab) {
   $("#page-title").textContent = TAB_TITLES[tab];
   if (tab === "list") renderList();
   if (tab === "log") renderLog();
+  // 第一次進「附近」自動定位
+  if (tab === "nearby" && !nearbyPlaces) locate();
   window.scrollTo(0, 0);
 }
 
@@ -799,8 +883,7 @@ function initUI() {
   $("#avoid-days").value = String(s.avoidDays);
   $("#only-want").checked = s.onlyWant;
   $("#only-want-row").classList.toggle("hidden", s.source !== "place");
-  setSeg("#radius", s.radius);
-  $("#hide-visited").checked = s.hideVisited;
+  $("#nb-radius").value = String(s.radius);
   renderList();
   renderLog();
 }
