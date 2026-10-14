@@ -20,10 +20,10 @@
 | 功能 | 沒有 key | 有 key |
 |---|---|---|
 | 附近的店 | OpenStreetMap（免費，但伺服器偶爾很慢或掛掉） | Google Places（較穩定，含評分與價位） |
-| 評價摘要 | 不顯示 | Google 評論摘要；沒有時用 Claude 整理，再不行就節錄評論 |
+| 評價摘要 | 不顯示 | Google 評論摘要；沒有時用 Gemini 整理，再不行就節錄評論 |
 
 - **Google Maps API key**：在 Google Cloud Console 建立專案、啟用「Places API (New)」並建立 API key。建議把 key 限制為只允許 `https://danielliu-tw.github.io/*` 這個網址使用
-- **Claude API key**：在 Claude Console 建立。用 `claude-opus-5-5`、低 effort 整理評論
+- **Gemini API key**（選填）：在 Google AI Studio 建立，有免費額度（免費方案的內容會被 Google 用於改進產品）。用 `gemini-3.5-flash-lite` 整理評論
 
 金鑰只存在瀏覽器的 localStorage，不會被「匯出備份」帶出去。所有資料都只存在你的裝置上。
 
@@ -42,7 +42,7 @@ python -m http.server 8765
 | `index.html` | 頁面結構 |
 | `styles.css` | 樣式（支援深色模式） |
 | `app.js` | 主要邏輯：抽選、附近、口袋名單、紀錄 |
-| `reviews.js` | Google Places 查詢、評價摘要（Claude） |
+| `reviews.js` | Google Places 查詢、評價摘要（Gemini） |
 | `import.js` | Google 地圖與照片匯入 |
 | `data.js` | 內建料理類型庫 |
 | `sw.js` | Service worker（離線快取） |

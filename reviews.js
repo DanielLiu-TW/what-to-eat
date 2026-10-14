@@ -1,12 +1,11 @@
 "use strict";
 
-// 評價摘要：Google Places API（評分、價位、評論）＋ Claude（整理好評 / 負評）
+// 評價摘要：Google Places API（評分、價位、評論）＋ Gemini（整理好評 / 負評）
 // 金鑰另外存，不會被「匯出」帶出去
 const KEYS_STORE = "wte-keys";
 const REVIEW_CACHE_STORE = "wte-review-cache";
 const REVIEW_CACHE_DAYS = 7;
-const CLAUDE_SDK = "https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.129.0/+esm";
-const CLAUDE_MODEL = "claude-opus-5-5";
+const GEMINI_MODEL = "gemini-3.5-flash-lite";
 
 function getKeys() {
   try { return JSON.parse(localStorage.getItem(KEYS_STORE)) || {}; } catch { return {}; }
@@ -142,50 +141,41 @@ async function googleLookup(p) {
   }
 }
 
-// ---------- Claude 摘要 ----------
-let claudeClient = null;
-
-async function getClaude() {
-  if (!claudeClient) {
-    const { default: Anthropic } = await import(CLAUDE_SDK);
-    // 金鑰只存在使用者自己的瀏覽器裡，所以允許從瀏覽器直接呼叫
-    claudeClient = new Anthropic({ apiKey: getKeys().claude, dangerouslyAllowBrowser: true });
-  }
-  return claudeClient;
-}
-
+// ---------- Gemini 摘要 ----------
 const SUMMARY_SCHEMA = {
-  type: "object",
+  type: "OBJECT",
   properties: {
-    good: { type: "array", items: { type: "string" }, description: "好評重點，最多 3 點" },
-    bad: { type: "array", items: { type: "string" }, description: "負評重點，最多 3 點；沒有就給空陣列" },
+    good: { type: "ARRAY", items: { type: "STRING" }, description: "好評重點，最多 3 點" },
+    bad: { type: "ARRAY", items: { type: "STRING" }, description: "負評重點，最多 3 點；沒有就給空陣列" },
   },
   required: ["good", "bad"],
-  additionalProperties: false,
 };
 
-async function claudeSummarize(name, reviews) {
-  const client = await getClaude();
+async function geminiSummarize(name, reviews) {
   const text = reviews
     .map((r, i) => `評論 ${i + 1}（${r.rating ?? "?"} 星）：${(r.text?.text || r.originalText?.text || "").slice(0, 800)}`)
     .join("\n\n");
-  const res = await client.beta.messages.create({
-    model: CLAUDE_MODEL,
-    max_tokens: 2000,
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
-    output_config: { effort: "low", format: { type: "json_schema", schema: SUMMARY_SCHEMA } },
-    system: "你幫使用者快速判斷要不要去一家餐廳。根據提供的 Google 評論，用繁體中文整理好評和負評的重點。每點 20 字以內，具體描述（例如「湯頭濃郁」、「假日要排 30 分鐘」），不要空泛的形容。只根據評論內容，不要自己編造。",
-    messages: [{ role: "user", content: `餐廳：${name}\n\n${text}` }],
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": getKeys().gemini },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: "你幫使用者快速判斷要不要去一家餐廳。根據提供的 Google 評論，用繁體中文整理好評和負評的重點。每點 20 字以內，具體描述（例如「湯頭濃郁」、「假日要排 30 分鐘」），不要空泛的形容。只根據評論內容，不要自己編造。" }] },
+      contents: [{ role: "user", parts: [{ text: `餐廳：${name}\n\n${text}` }] }],
+      generationConfig: { responseMimeType: "application/json", responseSchema: SUMMARY_SCHEMA },
+    }),
   });
-  if (res.stop_reason === "refusal") return null;
-  const block = res.content.find((b) => b.type === "text");
-  if (!block) return null;
-  const out = JSON.parse(block.text);
-  return { good: out.good.slice(0, 3), bad: out.bad.slice(0, 3) };
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || "HTTP " + res.status);
+  }
+  const data = await res.json();
+  const out = (data.candidates?.[0]?.content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join("");
+  if (!out) return null;
+  const json = JSON.parse(out.replace(/^```(?:json)?\s*|\s*```$/g, ""));
+  return { good: (json.good || []).slice(0, 3), bad: (json.bad || []).slice(0, 3) };
 }
 
-// 沒有 Claude key 時：直接節錄最高分與最低分的評論
+// 沒有 Gemini key 時：直接節錄最高分與最低分的評論
 function excerptSummary(reviews) {
   const withText = reviews.filter((r) => (r.text?.text || "").trim());
   if (!withText.length) return null;
@@ -224,9 +214,9 @@ function getPlaceInfo(p) {
         }
         if (!info.summaryText && reviews.length) {
           let s = null;
-          if (getKeys().claude) {
-            try { s = await claudeSummarize(info.name || p.name, reviews); info.source = "AI 整理自 Google 評論"; }
-            catch (e) { console.warn("Claude 摘要失敗", e); }
+          if (getKeys().gemini) {
+            try { s = await geminiSummarize(info.name || p.name, reviews); info.source = "Gemini 整理自 Google 評論"; }
+            catch (e) { console.warn("Gemini 摘要失敗", e); }
           }
           if (!s) { s = excerptSummary(reviews); info.source = "Google 評論節錄"; }
           if (s) Object.assign(info, s);
@@ -286,13 +276,15 @@ function fillReview(el, p) {
 
 // ---------- 設定 ----------
 $("#save-keys-btn").addEventListener("click", () => {
-  setKeys({ google: $("#key-google").value.trim(), claude: $("#key-claude").value.trim() });
-  claudeClient = null;
+  setKeys({ google: $("#key-google").value.trim(), gemini: $("#key-gemini").value.trim() });
+  // 換了金鑰就清掉舊的評價快取，讓之前失敗的店可以重新查
+  reviewCache = {};
+  try { localStorage.removeItem(REVIEW_CACHE_STORE); } catch { /* 忽略 */ }
   toast("設定已儲存");
 });
 
 (() => {
   const k = getKeys();
   $("#key-google").value = k.google || "";
-  $("#key-claude").value = k.claude || "";
+  $("#key-gemini").value = k.gemini || "";
 })();
