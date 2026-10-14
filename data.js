@@ -24,7 +24,7 @@ const BUILTIN_CATEGORIES = [
   { id: "braised-pork", emoji: "🍚", name: "滷肉飯", price: 1, kw: ["滷肉飯", "魯肉飯", "肉燥"], osm: ["taiwanese"] },
   { id: "chicken-rice", emoji: "🍗", name: "雞肉飯", price: 1, kw: ["雞肉飯", "火雞肉"], osm: ["taiwanese", "chicken"] },
   { id: "fried-rice", emoji: "🍳", name: "炒飯 / 炒麵", price: 1, kw: ["炒飯", "炒麵"], osm: ["chinese", "fried_rice"] },
-  { id: "noodle-stall", emoji: "🍜", name: "麵攤 / 切仔麵", price: 1, kw: ["麵", "切仔"], osm: ["noodle", "taiwanese"] },
+  { id: "noodle-stall", emoji: "🍜", name: "麵攤 / 切仔麵", price: 1, kw: ["麵", "切仔", "麵線"], osm: ["noodle", "taiwanese"] },
   { id: "rechao", emoji: "🍻", name: "熱炒", price: 2, kw: ["熱炒", "快炒", "海產"], osm: ["taiwanese", "seafood"] },
   { id: "luwei", emoji: "🥢", name: "滷味", price: 1, kw: ["滷味"], osm: ["taiwanese"] },
   { id: "teppanyaki", emoji: "🥓", name: "鐵板燒", price: 2, kw: ["鐵板燒"], osm: ["teppanyaki"] },

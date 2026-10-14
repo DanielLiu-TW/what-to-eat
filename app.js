@@ -7,9 +7,9 @@ const DAY = 24 * 60 * 60 * 1000;
 const defaultState = () => ({
   catOverrides: {},       // 內建類型的修改 { id: { name, emoji, price, hidden } }
   customCategories: [],   // 自訂類型
-  places: [],             // 口袋名單 { id, name, categoryId, price, note }
+  places: [],             // 口袋名單 { id, name, categoryId, price, note, status: "want" | "been", url }
   logs: [],               // 飲食紀錄 { id, ts, name, emoji, categoryId, placeId }
-  settings: { source: "category", prices: [1, 2], avoidDays: 3, radius: 800, hideVisited: true },
+  settings: { source: "nearby", budget: 300, avoidDays: 3, radius: 800, hideVisited: true, onlyWant: false },
 });
 
 function loadState() {
@@ -112,6 +112,11 @@ function lastEatenPlace(place) {
 }
 
 function addLog({ name, emoji, categoryId = null, placeId = null }) {
+  const place = placeId ? state.places.find((p) => p.id === placeId) : state.places.find((p) => p.name === name);
+  if (place) {
+    place.status = "been";
+    placeId = place.id;
+  }
   state.logs.push({ id: uid(), ts: Date.now(), name, emoji, categoryId, placeId });
   save();
   renderLog();
@@ -122,20 +127,52 @@ function addLog({ name, emoji, categoryId = null, placeId = null }) {
 let pickRejected = new Set();
 let pickShown = [];
 
-function pickPool() {
-  const { source, prices, avoidDays } = state.settings;
-  const cutoff = avoidDays > 0 ? startOfDay(Date.now()) - (avoidDays - 1) * DAY : Infinity;
-  const items =
-    source === "category"
-      ? allCategories().map((c) => ({ kind: "category", key: c.id, item: c, price: c.price, last: lastEatenCategory(c.id) }))
-      : state.places.map((p) => ({ kind: "place", key: p.id, item: p, price: p.price, last: lastEatenPlace(p) }));
-  return items.filter((x) => prices.includes(Number(x.price)) && !pickRejected.has(x.key) && !(x.last != null && x.last >= cutoff));
+// 預算滑軌：價位區間的下限低於預算就算在範圍內；拉到最右邊是不限
+const BUDGET_MAX = 1000;
+const TIER_MIN = { 1: 0, 2: 150, 3: 350 };
+
+function inBudget(tier) {
+  const b = state.settings.budget;
+  return b >= BUDGET_MAX || (TIER_MIN[tier] ?? 0) < b;
 }
 
-// 越久沒吃的權重越高，沒吃過的最高
+function budgetText(b) {
+  return b >= BUDGET_MAX ? "不限" : `NT$ ${b} 以內`;
+}
+
+function lastEatenName(name) {
+  let last = null;
+  for (const l of state.logs) if (l.name === name && (last == null || l.ts > last)) last = l.ts;
+  return last;
+}
+
+function pickPool() {
+  const { source, avoidDays } = state.settings;
+  const cutoff = avoidDays > 0 ? startOfDay(Date.now()) - (avoidDays - 1) * DAY : Infinity;
+  const wantNames = new Set(state.places.filter((p) => p.status === "want").map((p) => p.name));
+  const items =
+    source === "nearby"
+      ? (nearbyPlaces || []).map((p) => {
+          const last = lastEatenName(p.name);
+          // 不知道價位的店先當作在預算內
+          return { kind: "nearby", key: p.id, item: p, price: p.tier || p.cat?.price || 1, last, fresh: last == null, want: wantNames.has(p.name) };
+        })
+      : source === "category"
+      ? allCategories().map((c) => ({ kind: "category", key: c.id, item: c, price: c.price, last: lastEatenCategory(c.id) }))
+      : state.places
+          .filter((p) => !state.settings.onlyWant || p.status === "want")
+          .map((p) => ({ kind: "place", key: p.id, item: p, price: p.price, last: lastEatenPlace(p), want: p.status === "want" }));
+  return items.filter((x) => inBudget(Number(x.price)) && !pickRejected.has(x.key) && !(x.last != null && x.last >= cutoff));
+}
+
+// 越久沒吃的權重越高，沒吃過的最高；想吃清單裡的店加倍；附近沒去過的新店再加重
 function weight(x) {
   const days = x.last == null ? 30 : Math.min(30, (Date.now() - x.last) / DAY);
-  return 1 + days / 10;
+  return (1 + days / 10) * (x.want ? 2 : 1) * (x.kind === "nearby" && x.fresh ? 3 : 1);
+}
+
+function placeMapsUrl(p) {
+  return p.url || mapsSearchUrl(p.name);
 }
 
 function weightedSample(pool, n, exclude = new Set()) {
@@ -154,12 +191,24 @@ function weightedSample(pool, n, exclude = new Set()) {
   return out;
 }
 
-function doPick(reroll = false) {
+async function doPick(reroll = false) {
   if (reroll) pickShown.forEach((x) => pickRejected.add(x.key));
+  if (state.settings.source === "nearby" && !nearbyPlaces) {
+    const btn = $("#pick-btn");
+    btn.disabled = true;
+    $("#pick-actions").classList.add("hidden");
+    try {
+      await loadNearby((msg) => { $("#pick-results").innerHTML = `<div class="empty">${esc(msg)}</div>`; });
+    } catch (e) {
+      return showPickEmpty("⚠️ " + e.message);
+    } finally {
+      btn.disabled = false;
+    }
+    if (!nearbyPlaces.length) return showPickEmpty("附近沒有找到店家，試試到「附近」放大範圍");
+  }
   const pool = pickPool();
-  if (!state.settings.prices.length) return showPickEmpty("先選至少一個預算區間喔");
   if (state.settings.source === "place" && !state.places.length)
-    return showPickEmpty("口袋名單還是空的，先到「口袋名單」新增幾家常去或想去的店吧！");
+    return showPickEmpty("口袋名單還是空的，先到「口袋名單」新增，或從 Google 地圖、照片匯入吧！");
   if (!pool.length) {
     if (pickRejected.size) {
       pickRejected = new Set();
@@ -192,6 +241,23 @@ function renderPick() {
   const box = $("#pick-results");
   box.innerHTML = pickShown
     .map((x) => {
+      if (x.kind === "nearby") {
+        const p = x.item;
+        const meta = [p.cat ? p.cat.name : AMENITY_LABEL[p.amenity] || "餐廳", `${p.dist}m`, x.fresh ? "" : daysAgoText(x.last)].filter(Boolean);
+        return `<div class="card" data-key="${esc(x.key)}">
+          <div class="card-head">
+            <div class="card-emoji">${esc(p.cat?.emoji || "🍽️")}</div>
+            <div class="card-title">${esc(p.name)}${x.fresh ? '<span class="badge">沒去過</span>' : ""}${x.want ? '<span class="badge">想吃</span>' : ""}<div class="card-meta">${esc(meta.join(" · "))}</div></div>
+            <button class="card-close" data-act="reject" aria-label="不想吃">✕</button>
+          </div>
+          <div class="gplace"></div>
+          <div class="card-btns">
+            <button class="go" data-act="eat">✓ 就吃這家</button>
+            <a href="${esc(nearbyMapsUrl(p))}" target="_blank" rel="noopener">🗺️ 地圖</a>
+            <button data-act="save">＋ 口袋</button>
+          </div>
+        </div>`;
+      }
       if (x.kind === "category") {
         const c = x.item;
         return `<div class="card" data-key="${esc(x.key)}">
@@ -212,17 +278,21 @@ function renderPick() {
       return `<div class="card" data-key="${esc(x.key)}">
         <div class="card-head">
           <div class="card-emoji">${esc(c?.emoji || "🍽️")}</div>
-          <div class="card-title">${esc(p.name)}<div class="card-meta">${esc(c?.name || "未分類")} · ${PRICE_LABEL[p.price]} · ${daysAgoText(x.last)}${p.note ? " · " + esc(p.note) : ""}</div></div>
+          <div class="card-title">${esc(p.name)}${x.want ? '<span class="badge">想吃</span>' : ""}<div class="card-meta">${esc(c?.name || "未分類")} · ${PRICE_LABEL[p.price]} · ${daysAgoText(x.last)}${p.note ? " · " + esc(p.note) : ""}</div></div>
           <button class="card-close" data-act="reject" aria-label="不想吃">✕</button>
         </div>
         <div class="card-btns">
           <button class="go" data-act="eat">✓ 就吃這家</button>
-          <a href="${mapsSearchUrl(p.name)}" target="_blank" rel="noopener">🗺️ 地圖</a>
+          <a href="${esc(placeMapsUrl(p))}" target="_blank" rel="noopener">🗺️ 地圖</a>
         </div>
       </div>`;
     })
     .join("");
   $("#pick-actions").classList.toggle("hidden", !pickShown.length);
+  for (const x of pickShown) {
+    const el = box.querySelector(`.card[data-key="${CSS.escape(x.key)}"] .gplace`);
+    if (x.kind === "nearby") fillReview(el, x.item);
+  }
 }
 
 $("#pick-results").addEventListener("click", (e) => {
@@ -233,14 +303,17 @@ $("#pick-results").addEventListener("click", (e) => {
   if (!x) return;
   const act = btn.dataset.act;
   if (act === "reject") rejectOne(key);
+  else if (act === "save") savePlaceFromNearby(x.item);
   else if (act === "eat") {
-    if (x.kind === "category") addLog({ name: x.item.name, emoji: x.item.emoji, categoryId: x.item.id });
+    if (x.kind === "nearby") addLog({ name: x.item.name, emoji: x.item.cat?.emoji, categoryId: x.item.cat?.id || null });
+    else if (x.kind === "category") addLog({ name: x.item.name, emoji: x.item.emoji, categoryId: x.item.id });
     else addLog({ name: x.item.name, emoji: categoryById(x.item.categoryId)?.emoji, categoryId: x.item.categoryId, placeId: x.item.id });
     pickShown = [];
     pickRejected = new Set();
     renderPick();
   } else if (act === "nearby") {
     $("#nearby-filter").value = x.item.name;
+    nearbyRandom = null;
     switchTab("nearby");
     if (nearbyPlaces) renderNearby();
     else locate();
@@ -267,23 +340,24 @@ $("#pick-source").addEventListener("click", (e) => {
   if (!b) return;
   state.settings.source = b.dataset.v;
   setSeg("#pick-source", b.dataset.v);
+  $("#only-want-row").classList.toggle("hidden", b.dataset.v !== "place");
   save();
   if (pickShown.length) { pickRejected = new Set(); doPick(); }
 });
 
-$("#pick-price").addEventListener("click", (e) => {
-  const b = e.target.closest("button");
-  if (!b) return;
-  const v = Number(b.dataset.v);
-  const set = new Set(state.settings.prices);
-  set.has(v) ? set.delete(v) : set.add(v);
-  state.settings.prices = [...set].sort();
-  b.classList.toggle("on", set.has(v));
-  save();
+$("#budget").addEventListener("input", (e) => {
+  state.settings.budget = Number(e.target.value);
+  $("#budget-value").textContent = budgetText(state.settings.budget);
 });
+$("#budget").addEventListener("change", save);
 
 $("#avoid-days").addEventListener("change", (e) => {
   state.settings.avoidDays = Number(e.target.value);
+  save();
+});
+
+$("#only-want").addEventListener("change", (e) => {
+  state.settings.onlyWant = e.target.checked;
   save();
 });
 
@@ -291,6 +365,7 @@ $("#avoid-days").addEventListener("change", (e) => {
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
 const AMENITY_LABEL = { restaurant: "餐廳", fast_food: "速食 / 小吃", food_court: "美食街", cafe: "咖啡 / 早午餐" };
 
@@ -321,7 +396,7 @@ out center tags 400;`;
   let lastErr;
   for (const url of OVERPASS_ENDPOINTS) {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 30000);
+    const timer = setTimeout(() => ctrl.abort(), 20000);
     try {
       const res = await fetch(url, { method: "POST", body: "data=" + encodeURIComponent(q), headers: { "Content-Type": "application/x-www-form-urlencoded" }, signal: ctrl.signal });
       if (!res.ok) throw new Error("HTTP " + res.status);
@@ -335,39 +410,61 @@ out center tags 400;`;
   throw new Error("查詢附近店家失敗（" + (lastErr?.message || "網路錯誤") + "），稍後再試");
 }
 
+let lastPosition = null; // { latitude, longitude }
+
+async function nearbyFromOverpass(lat, lon) {
+  const data = await fetchOverpass(lat, lon, state.settings.radius);
+  return data.elements.map((el) => {
+    const t = el.tags || {};
+    const plat = el.lat ?? el.center?.lat, plon = el.lon ?? el.center?.lon;
+    const addr = [t["addr:city"], t["addr:district"], t["addr:street"], t["addr:housenumber"] && t["addr:housenumber"] + "號"].filter(Boolean).join("");
+    return { id: el.type + el.id, name: t["name:zh"] || t.name, lat: plat, lon: plon, cuisine: t.cuisine || "", amenity: t.amenity, addr };
+  });
+}
+
+// 定位並抓附近的店，結果放在 nearbyPlaces。有 Google key 先用 Google，失敗再用 OpenStreetMap
+async function loadNearby(onStatus = () => {}) {
+  onStatus("📡 定位中…");
+  const pos = await getPosition();
+  const { latitude: lat, longitude: lon } = pos.coords;
+  lastPosition = { latitude: lat, longitude: lon };
+  onStatus("🔎 搜尋附近的店…");
+  let raw = null, googleErr = null;
+  if (hasGoogleKey()) {
+    try { raw = await googleNearby(lat, lon, state.settings.radius); }
+    catch (e) { googleErr = e; console.warn("Google 附近搜尋失敗，改用 OpenStreetMap", e); }
+  }
+  if (!raw) {
+    try { raw = await nearbyFromOverpass(lat, lon); }
+    catch (e) {
+      throw new Error(googleErr ? `Google 和 OpenStreetMap 都查詢失敗（${googleErr.message}）` : e.message + "。可以到「紀錄」設定 Google Maps API key，查詢會更穩定");
+    }
+  }
+  const seen = new Set();
+  nearbyPlaces = raw
+    .filter((p) => p.name && p.lat != null && !seen.has(p.name) && seen.add(p.name))
+    .map((p) => ({ ...p, dist: Math.round(distance(lat, lon, p.lat, p.lon)), cat: guessCategory(p.name, p.cuisine) }))
+    .sort((a, b) => a.dist - b.dist);
+  nearbyRandom = null;
+  renderNearby();
+}
+
 async function locate() {
   const btn = $("#locate-btn");
   const status = $("#nearby-status");
   btn.disabled = true;
-  status.textContent = "📡 定位中…";
   try {
-    const pos = await getPosition();
-    const { latitude: lat, longitude: lon } = pos.coords;
-    status.textContent = "🔎 搜尋附近的店…";
-    const data = await fetchOverpass(lat, lon, state.settings.radius);
-    const seen = new Set();
-    nearbyPlaces = data.elements
-      .map((el) => {
-        const t = el.tags || {};
-        const plat = el.lat ?? el.center?.lat, plon = el.lon ?? el.center?.lon;
-        const name = t["name:zh"] || t.name;
-        const addr = [t["addr:city"], t["addr:district"], t["addr:street"], t["addr:housenumber"] && t["addr:housenumber"] + "號"].filter(Boolean).join("");
-        return {
-          id: el.type + el.id, name, lat: plat, lon: plon,
-          cuisine: t.cuisine || "", amenity: t.amenity, addr,
-          dist: Math.round(distance(lat, lon, plat, plon)),
-        };
-      })
-      .filter((p) => p.name && p.lat != null && !seen.has(p.name) && seen.add(p.name))
-      .sort((a, b) => a.dist - b.dist);
-    nearbyPlaces.forEach((p) => { p.cat = guessCategory(p.name, p.cuisine); });
-    nearbyRandom = null;
-    renderNearby();
+    await loadNearby((msg) => { status.textContent = msg; });
   } catch (e) {
     status.textContent = "⚠️ " + e.message;
   } finally {
     btn.disabled = false;
   }
+}
+
+function savePlaceFromNearby(p) {
+  if (state.places.some((x) => x.name === p.name)) return toast("已經在口袋名單裡了");
+  openEdit("place", null, { name: p.name, categoryId: p.cat?.id || "", price: p.cat?.price || 2, note: p.addr, status: "want" });
 }
 
 function nearbyFiltered() {
@@ -390,6 +487,7 @@ function nearbyFiltered() {
 }
 
 function nearbyMapsUrl(p) {
+  if (p.mapsUrl) return p.mapsUrl;
   return mapsSearchUrl(p.addr ? `${p.name} ${p.addr}` : `${p.lat},${p.lon}`);
 }
 
@@ -414,20 +512,27 @@ function renderNearby() {
     list.innerHTML = `<div class="empty">沒有符合的店，試試清除篩選或放大範圍</div>`;
     return;
   }
+  const showReviewBtn = hasGoogleKey() && !nearbyRandom;
   list.innerHTML = shown.slice(0, 80).map((p) => {
     const meta = [p.cat ? `${p.cat.emoji} ${p.cat.name}` : AMENITY_LABEL[p.amenity], p.dist + "m"].filter(Boolean);
-    if (!p.cat && p.cuisine) meta.splice(1, 0, p.cuisine);
+    if (!p.cat && p.cuisine && !p.gid) meta.splice(1, 0, p.cuisine);
+    if (p.rating) meta.push(`★ ${p.rating.toFixed(1)}`);
+    if (p.tier) meta.push(PRICE_LABEL[p.tier]);
     return `<div class="card" data-id="${esc(p.id)}">
       <div class="card-head">
         <div class="card-title">${esc(p.name)}<div class="card-meta">${esc(meta.join(" · "))}</div></div>
       </div>
+      <div class="gplace"></div>
       <div class="card-btns">
         <button class="go" data-act="eat">✓ 就吃這家</button>
-        <a href="${nearbyMapsUrl(p)}" target="_blank" rel="noopener">🗺️ 地圖</a>
+        <a href="${esc(nearbyMapsUrl(p))}" target="_blank" rel="noopener">🗺️ 地圖</a>
         <button data-act="save">＋ 口袋</button>
+        ${showReviewBtn ? `<button data-act="review">💬 評價</button>` : ""}
       </div>
     </div>`;
   }).join("");
+  // 隨機抽出的 3 家自動載入評價；完整清單則按「評價」才載入，避免浪費 API 額度
+  if (nearbyRandom) shown.forEach((p) => fillReview(list.querySelector(`.card[data-id="${CSS.escape(p.id)}"] .gplace`), p));
 }
 
 $("#nearby-list").addEventListener("click", (e) => {
@@ -439,8 +544,10 @@ $("#nearby-list").addEventListener("click", (e) => {
     addLog({ name: p.name, emoji: p.cat?.emoji, categoryId: p.cat?.id || null });
     renderNearby();
   } else if (btn.dataset.act === "save") {
-    if (state.places.some((x) => x.name === p.name)) return toast("已經在口袋名單裡了");
-    openEdit("place", null, { name: p.name, categoryId: p.cat?.id || "", price: p.cat?.price || 2, note: p.addr });
+    savePlaceFromNearby(p);
+  } else if (btn.dataset.act === "review") {
+    fillReview(btn.closest(".card").querySelector(".gplace"), p);
+    btn.remove();
   }
 });
 
@@ -475,21 +582,25 @@ let listMode = "place";
 
 function renderList() {
   const box = $("#list-items");
+  $("#import-row").classList.toggle("hidden", listMode !== "place");
   if (listMode === "place") {
     if (!state.places.length) {
-      box.innerHTML = `<div class="empty">還沒有餐廳<br>把常去的、想去的店加進來，<br>「幫我選」就能從這裡抽！</div>`;
+      box.innerHTML = `<div class="empty">還沒有餐廳<br>把常去的、想去的店加進來，<br>或從 Google 地圖、照片匯入，<br>「幫我選」就能從這裡抽！</div>`;
       return;
     }
-    box.innerHTML = state.places
-      .map((p) => {
-        const c = categoryById(p.categoryId);
-        return `<button class="list-item" data-id="${esc(p.id)}">
-          <span class="li-emoji">${esc(c?.emoji || "🍽️")}</span>
-          <span class="li-main"><div class="li-title">${esc(p.name)}</div><div class="li-sub">${esc(c?.name || "未分類")} · ${PRICE_LABEL[p.price]}${p.note ? " · " + esc(p.note) : ""}</div></span>
-          <span class="li-right">${daysAgoText(lastEatenPlace(p))}</span>
-        </button>`;
-      })
-      .join("");
+    const item = (p) => {
+      const c = categoryById(p.categoryId);
+      return `<button class="list-item" data-id="${esc(p.id)}">
+        <span class="li-emoji">${esc(c?.emoji || "🍽️")}</span>
+        <span class="li-main"><div class="li-title">${esc(p.name)}</div><div class="li-sub">${esc(c?.name || "未分類")} · ${PRICE_LABEL[p.price]}${p.note ? " · " + esc(p.note) : ""}</div></span>
+        <span class="li-right">${p.status === "want" ? "" : daysAgoText(lastEatenPlace(p))}</span>
+      </button>`;
+    };
+    const want = state.places.filter((p) => p.status === "want");
+    const been = state.places.filter((p) => p.status !== "want").sort((a, b) => (lastEatenPlace(b) || 0) - (lastEatenPlace(a) || 0));
+    box.innerHTML =
+      (want.length ? `<div class="section-head">🆕 想吃（${want.length}）</div>` + want.map(item).join("") : "") +
+      (been.length ? `<div class="section-head">✅ 吃過（${been.length}）</div>` + been.map(item).join("") : "");
   } else {
     box.innerHTML =
       `<p class="muted small">點一下可以修改價位或隱藏不想出現的類型。</p>` +
@@ -527,10 +638,12 @@ function openEdit(kind, id, preset = {}) {
   editing = { kind, id };
   const isPlace = kind === "place";
   const existing = id ? (isPlace ? state.places.find((p) => p.id === id) : categoryById(id)) : null;
-  const v = { name: "", emoji: "", categoryId: "", price: 2, note: "", ...preset, ...(existing || {}) };
+  const v = { name: "", emoji: "", categoryId: "", price: 2, note: "", status: "want", ...preset, ...(existing || {}) };
 
   $("#edit-title").textContent = (id ? "編輯" : "新增") + (isPlace ? "餐廳" : "料理類型");
   $("#cat-row").classList.toggle("hidden", !isPlace);
+  $("#status-row").classList.toggle("hidden", !isPlace);
+  form.status.value = v.status === "want" ? "want" : "been";
   $("#note-row").classList.toggle("hidden", !isPlace);
   $("#emoji-row").classList.toggle("hidden", isPlace);
 
@@ -562,7 +675,7 @@ form.addEventListener("submit", (e) => {
   if (!name) return;
   const price = Number(form.price.value);
   if (kind === "place") {
-    const data = { name, categoryId: form.categoryId.value || null, price, note: form.note.value.trim() };
+    const data = { name, categoryId: form.categoryId.value || null, price, note: form.note.value.trim(), status: form.status.value };
     if (id) Object.assign(state.places.find((p) => p.id === id), data);
     else state.places.push({ id: uid(), ...data });
   } else {
@@ -681,8 +794,11 @@ $(".tabbar").addEventListener("click", (e) => {
 function initUI() {
   const s = state.settings;
   setSeg("#pick-source", s.source);
-  $$("#pick-price button").forEach((b) => b.classList.toggle("on", s.prices.includes(Number(b.dataset.v))));
+  $("#budget").value = String(s.budget);
+  $("#budget-value").textContent = budgetText(s.budget);
   $("#avoid-days").value = String(s.avoidDays);
+  $("#only-want").checked = s.onlyWant;
+  $("#only-want-row").classList.toggle("hidden", s.source !== "place");
   setSeg("#radius", s.radius);
   $("#hide-visited").checked = s.hideVisited;
   renderList();

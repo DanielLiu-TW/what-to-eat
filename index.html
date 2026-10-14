@@ -23,16 +23,14 @@
       <div class="panel">
         <div class="field-label">從哪裡選</div>
         <div class="seg" id="pick-source">
-          <button data-v="category" class="on">料理類型</button>
+          <button data-v="nearby" class="on">附近的店</button>
+          <button data-v="category">料理類型</button>
           <button data-v="place">口袋名單</button>
         </div>
 
-        <div class="field-label">預算</div>
-        <div class="chips" id="pick-price">
-          <button data-v="1" class="on">$ <small>150↓</small></button>
-          <button data-v="2" class="on">$$ <small>150–350</small></button>
-          <button data-v="3">$$$ <small>350↑</small></button>
-        </div>
+        <div class="field-label budget-label">每人預算 <b id="budget-value"></b></div>
+        <input type="range" id="budget" min="100" max="1000" step="50" aria-label="每人預算">
+        <div class="range-ticks"><span>$100</span><span>$500</span><span>不限</span></div>
 
         <label class="row-check">
           避開最近
@@ -45,6 +43,7 @@
           </select>
           天吃過的
         </label>
+        <label class="row-check hidden" id="only-want-row"><input type="checkbox" id="only-want"> 只抽還沒吃過的店</label>
       </div>
 
       <button class="big-btn" id="pick-btn">🎲 幫我選</button>
@@ -87,12 +86,27 @@
         <button data-v="category">料理類型</button>
       </div>
       <button class="big-btn secondary" id="add-btn">＋ 新增</button>
+      <div class="row-actions" id="import-row">
+        <button class="ghost" id="import-gmaps-btn">📥 從 Google 地圖</button>
+        <button class="ghost" id="import-photos-btn">📷 從照片</button>
+      </div>
       <div id="list-items" class="list"></div>
     </section>
 
     <!-- 紀錄 -->
     <section id="tab-log" class="tab">
       <div id="log-items" class="list"></div>
+      <div class="panel">
+        <div class="field-label">評價摘要設定（選填）</div>
+        <p class="muted small">填入 Google Maps API key 後，「附近」的店會顯示 Google 評分、價位與評論。再填 Claude API key，會用 AI 幫你整理好評 / 負評重點。金鑰只存在這支手機上。</p>
+        <label class="small muted">Google Maps API key
+          <input type="password" id="key-google" autocomplete="off" spellcheck="false" placeholder="AIza…">
+        </label>
+        <label class="small muted">Claude API key
+          <input type="password" id="key-claude" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
+        </label>
+        <div class="row-actions"><button class="primary" id="save-keys-btn">儲存設定</button></div>
+      </div>
       <div class="panel">
         <div class="field-label">資料備份</div>
         <p class="muted small">資料只存在這支手機的瀏覽器裡，建議偶爾匯出備份。</p>
@@ -118,6 +132,12 @@
       <h2 id="edit-title">新增</h2>
       <label>名稱<input name="name" required maxlength="40"></label>
       <label id="emoji-row">圖示<input name="emoji" maxlength="4" placeholder="🍽️"></label>
+      <label id="status-row">狀態
+        <select name="status">
+          <option value="want">想吃（還沒吃過）</option>
+          <option value="been">吃過</option>
+        </select>
+      </label>
       <label id="cat-row">類型<select name="categoryId"></select></label>
       <label>價位
         <select name="price">
@@ -136,9 +156,27 @@
     </form>
   </dialog>
 
+  <!-- 匯入對話框 -->
+  <dialog id="import-dialog" class="tall">
+    <h2 id="import-title">匯入</h2>
+    <div id="import-help" class="small"></div>
+    <input type="file" id="import-input" multiple hidden>
+    <button class="big-btn secondary" id="import-pick-btn">選擇檔案</button>
+    <p id="import-status" class="muted small center"></p>
+    <div id="import-select-all" class="row-check hidden"><label><input type="checkbox" id="import-all"> 全選</label><span class="spacer"></span><span id="import-count" class="muted small"></span></div>
+    <label id="import-log-row" class="row-check hidden"><input type="checkbox" id="import-add-log" checked> 同時用拍照時間加入飲食紀錄</label>
+    <div id="import-rows" class="import-rows"></div>
+    <div class="row-actions">
+      <button class="ghost" id="import-cancel-btn">取消</button>
+      <button class="primary" id="import-ok-btn" disabled>匯入</button>
+    </div>
+  </dialog>
+
   <div id="toast" class="toast"></div>
 
   <script src="data.js"></script>
   <script src="app.js"></script>
+  <script src="reviews.js"></script>
+  <script src="import.js"></script>
 </body>
 </html>
