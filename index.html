@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#e8603c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="吃什麼">
+  <title>今天吃什麼</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1 id="page-title">今天吃什麼</h1>
+  </header>
+
+  <main>
+    <!-- 幫我選 -->
+    <section id="tab-pick" class="tab active">
+      <div class="panel">
+        <div class="field-label">從哪裡選</div>
+        <div class="seg" id="pick-source">
+          <button data-v="category" class="on">料理類型</button>
+          <button data-v="place">口袋名單</button>
+        </div>
+
+        <div class="field-label">預算</div>
+        <div class="chips" id="pick-price">
+          <button data-v="1" class="on">$ <small>150↓</small></button>
+          <button data-v="2" class="on">$$ <small>150–350</small></button>
+          <button data-v="3">$$$ <small>350↑</small></button>
+        </div>
+
+        <label class="row-check">
+          避開最近
+          <select id="avoid-days">
+            <option value="0">0</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="5">5</option>
+            <option value="7">7</option>
+          </select>
+          天吃過的
+        </label>
+      </div>
+
+      <button class="big-btn" id="pick-btn">🎲 幫我選</button>
+
+      <div id="pick-results" class="cards"></div>
+      <div id="pick-actions" class="row-actions hidden">
+        <button class="ghost" id="reroll-btn">🔄 換一批</button>
+        <button class="ghost" id="share-btn">📤 問朋友</button>
+      </div>
+    </section>
+
+    <!-- 附近 -->
+    <section id="tab-nearby" class="tab">
+      <div class="panel">
+        <div class="field-label">範圍</div>
+        <div class="seg" id="radius">
+          <button data-v="400">400m</button>
+          <button data-v="800" class="on">800m</button>
+          <button data-v="1500">1.5km</button>
+          <button data-v="3000">3km</button>
+        </div>
+        <input id="nearby-filter" type="search" placeholder="篩選：例如 拉麵、咖哩、ramen">
+        <label class="row-check"><input type="checkbox" id="hide-visited" checked> 隱藏吃過的店</label>
+      </div>
+      <div class="row-actions">
+        <button class="big-btn" id="locate-btn">📍 找附近的店</button>
+      </div>
+      <p id="nearby-status" class="muted center"></p>
+      <div id="nearby-actions" class="row-actions hidden">
+        <button class="ghost" id="nearby-random-btn">🎲 隨機抽 3 家</button>
+        <button class="ghost" id="nearby-all-btn">📋 顯示全部</button>
+      </div>
+      <div id="nearby-list" class="cards"></div>
+    </section>
+
+    <!-- 口袋名單 -->
+    <section id="tab-list" class="tab">
+      <div class="seg" id="list-mode">
+        <button data-v="place" class="on">我的餐廳</button>
+        <button data-v="category">料理類型</button>
+      </div>
+      <button class="big-btn secondary" id="add-btn">＋ 新增</button>
+      <div id="list-items" class="list"></div>
+    </section>
+
+    <!-- 紀錄 -->
+    <section id="tab-log" class="tab">
+      <div id="log-items" class="list"></div>
+      <div class="panel">
+        <div class="field-label">資料備份</div>
+        <p class="muted small">資料只存在這支手機的瀏覽器裡，建議偶爾匯出備份。</p>
+        <div class="row-actions">
+          <button class="ghost" id="export-btn">匯出</button>
+          <button class="ghost" id="import-btn">匯入</button>
+          <input type="file" id="import-file" accept="application/json" hidden>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabbar">
+    <button data-tab="pick" class="on"><span>🎲</span>幫我選</button>
+    <button data-tab="nearby"><span>📍</span>附近</button>
+    <button data-tab="list"><span>📒</span>口袋名單</button>
+    <button data-tab="log"><span>🕘</span>紀錄</button>
+  </nav>
+
+  <!-- 新增 / 編輯對話框 -->
+  <dialog id="edit-dialog">
+    <form method="dialog" id="edit-form">
+      <h2 id="edit-title">新增</h2>
+      <label>名稱<input name="name" required maxlength="40"></label>
+      <label id="emoji-row">圖示<input name="emoji" maxlength="4" placeholder="🍽️"></label>
+      <label id="cat-row">類型<select name="categoryId"></select></label>
+      <label>價位
+        <select name="price">
+          <option value="1">$（約 150 以下）</option>
+          <option value="2">$$（約 150–350）</option>
+          <option value="3">$$$（約 350 以上）</option>
+        </select>
+      </label>
+      <label id="note-row">備註<input name="note" maxlength="80" placeholder="例如：公司附近、週一公休"></label>
+      <div class="row-actions">
+        <button type="button" class="ghost danger hidden" id="delete-btn">刪除</button>
+        <span class="spacer"></span>
+        <button value="cancel" formnovalidate class="ghost">取消</button>
+        <button value="ok" class="primary">儲存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
