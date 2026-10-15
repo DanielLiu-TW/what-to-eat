@@ -100,13 +100,48 @@ async function googleNearbyOnce(lat, lon, radius, rankPreference) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error?.message || "HTTP " + res.status);
   }
-  return ((await res.json()).places || []).map((g) => ({
+  return ((await res.json()).places || []).map(mapGooglePlace);
+}
+
+function mapGooglePlace(g) {
+  return {
     id: "g:" + g.id, gid: g.id,
     name: g.displayName?.text, lat: g.location?.latitude, lon: g.location?.longitude,
     cuisine: googleCuisine(g.primaryType), amenity: "restaurant", addr: g.formattedAddress || "",
     rating: g.rating, count: g.userRatingCount, tier: googleTier(g), mapsUrl: g.googleMapsUri,
     openNow: g.currentOpeningHours?.openNow,
-  }));
+  };
+}
+
+// 用關鍵字搜尋附近（像在 Google 地圖輸入「炸雞」），Google 會看菜單、評論和分類，不只看店名
+async function googleTextNearby(term, lat, lon, radius, maxPages = 3) {
+  const dLat = radius / 111320, dLon = radius / (111320 * Math.cos((lat * Math.PI) / 180));
+  const out = [];
+  let pageToken;
+  for (let page = 0; page < maxPages; page++) {
+    const res = await fetch("https://places.googleapis.com/v1/places:searchText", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": getKeys().google,
+        "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.primaryType,places.formattedAddress,places.googleMapsUri,places.rating,places.userRatingCount,places.priceLevel,places.priceRange,places.currentOpeningHours.openNow,nextPageToken",
+      },
+      body: JSON.stringify({
+        textQuery: term, languageCode: "zh-TW", regionCode: "TW", pageSize: 20,
+        locationRestriction: { rectangle: { low: { latitude: lat - dLat, longitude: lon - dLon }, high: { latitude: lat + dLat, longitude: lon + dLon } } },
+        ...(pageToken ? { pageToken } : {}),
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || "HTTP " + res.status);
+    }
+    const data = await res.json();
+    out.push(...(data.places || []).map(mapGooglePlace));
+    pageToken = data.nextPageToken;
+    if (!pageToken) break;
+  }
+  return out;
 }
 
 // 已知 Google place id 時直接查詳細資料，不用再搜尋

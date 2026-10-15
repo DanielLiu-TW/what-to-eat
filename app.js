@@ -317,7 +317,8 @@ $("#pick-results").addEventListener("click", (e) => {
     $("#nearby-filter").value = "";
     nearbyRandom = null;
     switchTab("nearby");
-    if (nearbyPlaces) renderNearby();
+    // 還沒定位的話，switchTab 會自動定位，定位完會接著搜尋這個類型
+    if (nearbyPlaces) { renderNearby(); searchCategoryNearby(x.item.id); }
   }
 });
 
@@ -450,23 +451,28 @@ async function loadNearby(onStatus = () => {}) {
   renderNearby();
 }
 
-let nearbyLoading = false;
+let locating = null; // 定位中的 Promise，避免重複定位
 
-async function locate() {
-  if (nearbyLoading) return;
-  nearbyLoading = true;
+function locate() {
+  if (locating) return locating;
   const btn = $("#locate-btn");
   const status = $("#nearby-status");
   btn.disabled = true;
   $("#nearby-list").innerHTML = "";
-  try {
-    await loadNearby((msg) => { status.textContent = msg; });
-  } catch (e) {
-    status.textContent = "⚠️ " + e.message;
-  } finally {
-    btn.disabled = false;
-    nearbyLoading = false;
-  }
+  locating = (async () => {
+    try {
+      await loadNearby((msg) => { status.textContent = msg; });
+      nbSearched.clear();
+      // 正在看某個類型時，換了位置或範圍要重新搜尋
+      if (nbFilter.cat && nbFilter.cat !== "_other") searchCategoryNearby(nbFilter.cat);
+    } catch (e) {
+      status.textContent = "⚠️ " + e.message;
+    } finally {
+      btn.disabled = false;
+      locating = null;
+    }
+  })();
+  return locating;
 }
 
 function savePlaceFromNearby(p) {
@@ -493,12 +499,72 @@ function nbMatches(p, { skipCat = false } = {}) {
   if (f.rating && !(p.rating >= 4)) return false;
   if (f.q) {
     const q = f.q.toLowerCase();
-    if (![p.name, p.cuisine, p.cat?.name || ""].some((s) => s.toLowerCase().includes(q))) return false;
+    const hit = [p.name, p.cuisine, p.cat?.name || ""].some((s) => s.toLowerCase().includes(q)) || p.matchQ?.includes(f.q);
+    if (!hit) return false;
   }
   if (!skipCat && f.cat) {
-    if (f.cat === "_other" ? p.cat : p.cat?.id !== f.cat) return false;
+    if (f.cat === "_other" ? placeCats(p).length : !placeCats(p).includes(f.cat)) return false;
   }
   return true;
+}
+
+// 一家店可能屬於好幾類：店名猜出來的類型，加上用 Google 關鍵字搜尋找到的類型
+function placeCats(p) {
+  const ids = p.matchCats ? [...p.matchCats] : [];
+  if (p.cat && !ids.includes(p.cat.id)) ids.unshift(p.cat.id);
+  return ids;
+}
+
+// ---------- 關鍵字搜尋附近（補足一般附近搜尋只抓得到 40 家的問題） ----------
+const nbSearched = new Map(); // 搜過的關鍵字 → Promise
+
+function categoryTerms(cat) {
+  return cat.name.split("/").map((s) => s.trim()).filter(Boolean).slice(0, 2);
+}
+
+function mergeNearby(found, tag) {
+  if (!lastPosition) return 0;
+  const { latitude: lat, longitude: lon } = lastPosition;
+  const byKey = new Map(nearbyPlaces.map((p) => [p.gid || p.name, p]));
+  let added = 0;
+  for (const f of found) {
+    if (!f.name || f.lat == null) continue;
+    const dist = Math.round(distance(lat, lon, f.lat, f.lon));
+    if (dist > state.settings.radius * 1.05) continue; // 搜尋範圍是方形，把角落的去掉
+    let p = byKey.get(f.gid || f.name) || nearbyPlaces.find((x) => x.name === f.name);
+    if (!p) {
+      p = { ...f, dist, cat: guessCategory(f.name, f.cuisine) };
+      nearbyPlaces.push(p);
+      byKey.set(f.gid || f.name, p);
+      added++;
+    }
+    if (tag.cat) (p.matchCats ||= []).includes(tag.cat) || p.matchCats.push(tag.cat);
+    if (tag.q) (p.matchQ ||= []).includes(tag.q) || p.matchQ.push(tag.q);
+  }
+  return added;
+}
+
+async function searchNearbyTerms(terms, tag, label) {
+  if (!hasGoogleKey() || !lastPosition || !nearbyPlaces) return;
+  const key = JSON.stringify([terms, state.settings.radius, lastPosition]);
+  if (!nbSearched.has(key)) {
+    const { latitude: lat, longitude: lon } = lastPosition;
+    nbSearched.set(key, (async () => {
+      $("#nearby-status").textContent = `🔎 在 Google 搜尋附近的「${label}」…`;
+      // 第一個關鍵字多翻幾頁，第二個（例如「鹹酥雞」）翻一頁
+      const results = await Promise.allSettled(terms.map((t, i) => googleTextNearby(t, lat, lon, state.settings.radius, i === 0 ? 3 : 1)));
+      const found = results.filter((r) => r.status === "fulfilled").flatMap((r) => r.value);
+      if (!found.length && results.some((r) => r.status === "rejected")) throw results.find((r) => r.status === "rejected").reason;
+      mergeNearby(found, tag);
+    })().catch((e) => { nbSearched.delete(key); toast("搜尋失敗：" + e.message); }));
+  }
+  await nbSearched.get(key);
+  renderNearby();
+}
+
+function searchCategoryNearby(catId) {
+  const cat = categoryById(catId);
+  if (cat) return searchNearbyTerms(categoryTerms(cat), { cat: catId }, cat.name);
 }
 
 function nearbyFiltered() {
@@ -538,17 +604,25 @@ function renderNearbyChips() {
   for (const p of nearbyPlaces) {
     if (!nbMatches(p, { skipCat: true })) continue;
     total++;
-    if (p.cat) counts.set(p.cat.id, (counts.get(p.cat.id) || 0) + 1);
-    else other++;
+    const ids = placeCats(p);
+    ids.forEach((id) => counts.set(id, (counts.get(id) || 0) + 1));
+    if (!ids.length) other++;
   }
   // 從「幫我選」帶過來的類型就算附近沒有也要顯示，才知道是在篩它
   if (nbFilter.cat && nbFilter.cat !== "_other" && !counts.has(nbFilter.cat)) counts.set(nbFilter.cat, 0);
   const chip = (id, label, n) =>
     `<button class="chip ${nbFilter.cat === id ? "on" : ""}" data-cat="${esc(id ?? "")}">${esc(label)} <span class="cnt">${n}</span></button>`;
+  // 最後放一個下拉選單，可以選任何類型去 Google 搜尋（附近一開始沒抓到的類型也找得到）
+  const more = hasGoogleKey()
+    ? `<span class="chip chip-select"><select id="nb-more" aria-label="搜尋其他類型"><option value="">🔍 其他類型</option>${
+        allCategories().map((c) => `<option value="${esc(c.id)}">${esc(`${c.emoji} ${c.name}`)}</option>`).join("")
+      }</select></span>`
+    : "";
   box.innerHTML =
     chip(null, "全部", total) +
     [...counts].sort((a, b) => b[1] - a[1]).map(([id, n]) => { const c = categoryById(id); return chip(id, `${c.emoji} ${c.name}`, n); }).join("") +
-    (other ? chip("_other", "其他", other) : "");
+    (other ? chip("_other", "其他", other) : "") +
+    more;
 }
 
 function renderNearby() {
@@ -562,6 +636,16 @@ function renderNearby() {
     : "這個範圍內沒有找到店家，試試放大範圍";
   $("#nearby-random-btn").classList.toggle("hidden", !items.length);
   $("#nearby-all-btn").classList.toggle("hidden", !nearbyRandom);
+  // 保底：直接開 Google 地圖搜尋同樣的東西
+  const term = nbFilter.q || (nbFilter.cat && nbFilter.cat !== "_other" ? categoryTerms(categoryById(nbFilter.cat))[0] : "");
+  const hint = $("#nb-gmaps");
+  hint.classList.toggle("hidden", !term);
+  if (term) {
+    hint.href = lastPosition
+      ? `https://www.google.com/maps/search/${encodeURIComponent(term)}/@${lastPosition.latitude},${lastPosition.longitude},16z`
+      : mapsSearchUrl(term);
+    hint.textContent = `🗺️ 在 Google 地圖看附近的「${term}」`;
+  }
 
   let shown = items;
   if (nearbyRandom) {
@@ -575,8 +659,11 @@ function renderNearby() {
   const showInfoBtn = hasGoogleKey() && !nearbyRandom;
   const visited = visitedNames();
   list.innerHTML = shown.slice(0, 80).map((p) => {
-    const meta = [p.cat ? `${p.cat.emoji} ${p.cat.name}` : AMENITY_LABEL[p.amenity] || "餐廳", p.dist + "m"];
-    if (!p.cat && p.cuisine && !p.gid) meta.splice(1, 0, p.cuisine);
+    // 正在篩某個類型時，顯示那個類型（例如用「炸雞」搜到的小吃店就標炸雞）
+    const ids = placeCats(p);
+    const cat = nbFilter.cat && ids.includes(nbFilter.cat) ? categoryById(nbFilter.cat) : p.cat || (ids[0] && categoryById(ids[0]));
+    const meta = [cat ? `${cat.emoji} ${cat.name}` : AMENITY_LABEL[p.amenity] || "餐廳", p.dist + "m"];
+    if (!cat && p.cuisine && !p.gid) meta.splice(1, 0, p.cuisine);
     if (p.rating) meta.push(`★ ${p.rating.toFixed(1)}`);
     if (p.tier) meta.push(PRICE_LABEL[p.tier]);
     if (p.openNow === true) meta.push("營業中");
@@ -621,6 +708,13 @@ function updateNearby() {
 
 $("#locate-btn").addEventListener("click", locate);
 $("#nearby-filter").addEventListener("input", (e) => { nbFilter.q = e.target.value.trim(); updateNearby(); });
+// 按 Enter（手機鍵盤的「搜尋」）時用 Google 搜尋附近，找名字裡沒有關鍵字的店
+$("#nearby-filter").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  e.target.blur();
+  const q = nbFilter.q;
+  if (q.length >= 1) searchNearbyTerms([q], { q }, q);
+});
 $("#nb-chips").addEventListener("click", (e) => {
   const b = e.target.closest("[data-toggle]");
   if (!b) return;
@@ -635,6 +729,13 @@ $("#nb-cats").addEventListener("click", (e) => {
   const id = b.dataset.cat || null;
   nbFilter.cat = nbFilter.cat === id ? null : id;
   updateNearby();
+  if (nbFilter.cat && nbFilter.cat !== "_other") searchCategoryNearby(nbFilter.cat);
+});
+$("#nb-cats").addEventListener("change", (e) => {
+  if (e.target.id !== "nb-more" || !e.target.value) return;
+  nbFilter.cat = e.target.value;
+  updateNearby();
+  searchCategoryNearby(nbFilter.cat);
 });
 $("#nb-radius").addEventListener("change", (e) => {
   state.settings.radius = Number(e.target.value);
