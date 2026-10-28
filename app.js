@@ -322,7 +322,15 @@ $("#pick-results").addEventListener("click", (e) => {
   }
 });
 
-$("#pick-btn").addEventListener("click", () => { pickRejected = new Set(); doPick(); });
+$("#pick-btn").addEventListener("click", (e) => {
+  // 骰子轉一圈的小動畫
+  const btn = e.currentTarget;
+  btn.classList.remove("rolling");
+  void btn.offsetWidth;
+  btn.classList.add("rolling");
+  pickRejected = new Set();
+  doPick();
+});
 $("#reroll-btn").addEventListener("click", () => doPick(true));
 
 $("#share-btn").addEventListener("click", async () => {
@@ -662,22 +670,24 @@ function renderNearby() {
     // 正在篩某個類型時，顯示那個類型（例如用「炸雞」搜到的小吃店就標炸雞）
     const ids = placeCats(p);
     const cat = nbFilter.cat && ids.includes(nbFilter.cat) ? categoryById(nbFilter.cat) : p.cat || (ids[0] && categoryById(ids[0]));
-    const meta = [cat ? `${cat.emoji} ${cat.name}` : AMENITY_LABEL[p.amenity] || "餐廳", p.dist + "m"];
+    const meta = [cat ? cat.name : AMENITY_LABEL[p.amenity] || "餐廳", p.dist + "m"];
     if (!cat && p.cuisine && !p.gid) meta.splice(1, 0, p.cuisine);
-    if (p.rating) meta.push(`★ ${p.rating.toFixed(1)}`);
     if (p.tier) meta.push(PRICE_LABEL[p.tier]);
-    if (p.openNow === true) meta.push("營業中");
-    if (p.openNow === false) meta.push("休息中");
+    const stats = [];
+    if (p.rating) stats.push(`<span class="star">★ ${p.rating.toFixed(1)}</span>`);
+    if (p.openNow === true) stats.push(`<span class="open">營業中</span>`);
+    if (p.openNow === false) stats.push(`<span class="closed">休息中</span>`);
     return `<div class="card" data-id="${esc(p.id)}">
       <div class="card-head">
-        <div class="card-title">${esc(p.name)}${visited.has(p.name) ? '<span class="badge been">吃過</span>' : ""}<div class="card-meta">${esc(meta.join(" · "))}</div></div>
+        <div class="card-emoji">${esc(cat?.emoji || "🍽️")}</div>
+        <div class="card-title">${esc(p.name)}${visited.has(p.name) ? '<span class="badge been">吃過</span>' : ""}<div class="card-meta">${esc(meta.join(" · "))}${stats.length ? ` · ${stats.join(" · ")}` : ""}</div></div>
+        ${showInfoBtn ? `<button class="card-more" data-act="review">評價<br>菜單</button>` : ""}
       </div>
       <div class="gplace"></div>
       <div class="card-btns">
         <button class="go" data-act="eat">✓ 就吃這家</button>
         <a href="${esc(nearbyMapsUrl(p))}" target="_blank" rel="noopener">🗺️ 地圖</a>
         <button data-act="save">＋ 口袋</button>
-        ${showInfoBtn ? `<button data-act="review">💬 評價菜單</button>` : ""}
       </div>
     </div>`;
   }).join("");
@@ -957,12 +967,29 @@ $("#import-file").addEventListener("change", async (e) => {
 });
 
 // ---------- 分頁 ----------
-const TAB_TITLES = { pick: "今天吃什麼", nearby: "附近有什麼", list: "口袋名單", log: "吃過的紀錄" };
+const TAB_TITLES = { pick: "今天吃什麼？", nearby: "附近有什麼", list: "口袋名單", log: "吃過的紀錄" };
+
+// 依時段問候，例如「午安 · 午餐想吃什麼？」
+function mealGreeting() {
+  const h = new Date().getHours();
+  if (h >= 5 && h < 10) return "早安 ☀️ · 早餐吃什麼好？";
+  if (h >= 10 && h < 14) return "午安 🍱 · 午餐時間到了";
+  if (h >= 14 && h < 17) return "下午好 ☕ · 來點下午茶？";
+  if (h >= 17 && h < 21) return "晚安 🌆 · 晚餐想吃什麼？";
+  return "夜深了 🌙 · 宵夜吃點什麼？";
+}
+
+const TAB_SUBS = {
+  nearby: () => "找找身邊沒去過的店",
+  list: () => `想吃 ${state.places.filter((p) => p.status === "want").length} 家 · 吃過 ${state.places.filter((p) => p.status !== "want").length} 家`,
+  log: () => `已經記錄 ${state.logs.length} 餐`,
+};
 
 function switchTab(tab) {
   $$(".tab").forEach((s) => s.classList.toggle("active", s.id === "tab-" + tab));
   $$(".tabbar button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
   $("#page-title").textContent = TAB_TITLES[tab];
+  $("#page-sub").textContent = tab === "pick" ? mealGreeting() : TAB_SUBS[tab]();
   if (tab === "list") renderList();
   if (tab === "log") renderLog();
   // 第一次進「附近」自動定位
@@ -990,6 +1017,7 @@ function initUI() {
 }
 
 initUI();
+$("#page-sub").textContent = mealGreeting();
 
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
   navigator.serviceWorker.register("sw.js").catch(() => {});

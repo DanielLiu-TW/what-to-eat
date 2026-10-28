@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#e8603c">
+  <meta name="theme-color" content="#fff7f0" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#14110f" media="(prefers-color-scheme: dark)">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="吃什麼">
   <title>今天吃什麼</title>
@@ -14,13 +15,16 @@
 </head>
 <body>
   <header class="topbar">
-    <h1 id="page-title">今天吃什麼</h1>
+    <div class="topbar-inner">
+      <div id="page-sub" class="page-sub"></div>
+      <h1 id="page-title">今天吃什麼？</h1>
+    </div>
   </header>
 
   <main>
     <!-- 幫我選 -->
     <section id="tab-pick" class="tab active">
-      <div class="panel">
+      <div class="panel hero">
         <div class="field-label">從哪裡選</div>
         <div class="seg" id="pick-source">
           <button data-v="nearby" class="on">附近的店</button>
@@ -46,7 +50,7 @@
         <label class="row-check hidden" id="only-want-row"><input type="checkbox" id="only-want"> 只抽還沒吃過的店</label>
       </div>
 
-      <button class="big-btn" id="pick-btn">🎲 幫我選</button>
+      <button class="big-btn pick-btn" id="pick-btn"><span class="dice" aria-hidden="true">🎲</span><span>幫我選</span></button>
 
       <div id="pick-results" class="cards"></div>
       <div id="pick-actions" class="row-actions hidden">
@@ -58,8 +62,11 @@
     <!-- 附近 -->
     <section id="tab-nearby" class="tab">
       <div class="nb-search">
-        <input id="nearby-filter" type="search" placeholder="🔍 搜尋店名或料理" autocomplete="off">
-        <button class="icon-btn" id="locate-btn" aria-label="重新定位">📍</button>
+        <label class="search-box">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input id="nearby-filter" type="search" placeholder="搜尋店名或料理…" autocomplete="off">
+        </label>
+        <button class="icon-btn" id="locate-btn" aria-label="重新定位"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="7.5"/></svg></button>
       </div>
       <div class="chip-bar" id="nb-chips">
         <span class="chip chip-select"><select id="nb-radius" aria-label="範圍">
@@ -109,6 +116,7 @@
     <!-- 紀錄 -->
     <section id="tab-log" class="tab">
       <div id="log-items" class="list"></div>
+      <div class="section-title">設定</div>
       <div class="panel">
         <div class="field-label">評價摘要設定（選填）</div>
         <p class="muted small">填入 Google Maps API key 後，「附近」的店會顯示 Google 評分、價位與評論。再填 Gemini API key，會用 AI 幫你整理好評 / 負評重點。金鑰只存在這支手機上。</p>
@@ -133,10 +141,10 @@
   </main>
 
   <nav class="tabbar">
-    <button data-tab="pick" class="on"><span>🎲</span>幫我選</button>
-    <button data-tab="nearby"><span>📍</span>附近</button>
-    <button data-tab="list"><span>📒</span>口袋名單</button>
-    <button data-tab="log"><span>🕘</span>紀錄</button>
+    <button data-tab="pick" class="on"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4"/><circle cx="8.5" cy="8.5" r="1.2" class="fill"/><circle cx="15.5" cy="15.5" r="1.2" class="fill"/><circle cx="12" cy="12" r="1.2" class="fill"/></svg>幫我選</button>
+    <button data-tab="nearby"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11Z"/><circle cx="12" cy="10" r="2.4"/></svg>附近</button>
+    <button data-tab="list"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 3.5h11a1 1 0 0 1 1 1v16l-6.5-4-6.5 4v-16a1 1 0 0 1 1-1Z"/></svg>口袋名單</button>
+    <button data-tab="log"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>紀錄</button>
   </nav>
 
   <!-- 新增 / 編輯對話框 -->
