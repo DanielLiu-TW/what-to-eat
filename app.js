@@ -433,6 +433,19 @@ async function nearbyFromOverpass(lat, lon) {
 }
 
 // 定位並抓附近的店，結果放在 nearbyPlaces。有 Google key 先用 Google，失敗再用 OpenStreetMap
+// 合併 Google 與 OpenStreetMap：同一家店（同名，或 40m 內名字互相包含）只留 Google 的
+function mergeSources(google, osm) {
+  const out = [...google];
+  for (const o of osm) {
+    if (!o.name || o.lat == null) continue;
+    const dup = google.some((g) =>
+      g.name === o.name ||
+      ((g.name.includes(o.name) || o.name.includes(g.name)) && distance(g.lat, g.lon, o.lat, o.lon) < 40));
+    if (!dup) out.push(o);
+  }
+  return out;
+}
+
 async function loadNearby(onStatus = () => {}) {
   onStatus("📡 定位中…");
   const pos = await getPosition();
@@ -441,8 +454,14 @@ async function loadNearby(onStatus = () => {}) {
   onStatus("🔎 搜尋附近的店…");
   let raw = null, googleErr = null;
   if (hasGoogleKey()) {
+    // Google 和 OpenStreetMap 同時查，有些巷子裡的小店只有其中一邊有。
+    // OpenStreetMap 的伺服器常常很慢，最多等 10 秒，沒回來就算了
+    const osm = Promise.race([nearbyFromOverpass(lat, lon), new Promise((r) => setTimeout(() => r([]), 10000))]).catch(() => []);
     try { raw = await googleNearby(lat, lon, state.settings.radius); }
     catch (e) { googleErr = e; console.warn("Google 附近搜尋失敗，改用 OpenStreetMap", e); }
+    const osmPlaces = await osm;
+    if (raw) raw = mergeSources(raw, osmPlaces);
+    else if (osmPlaces.length) raw = osmPlaces;
   }
   if (!raw) {
     try { raw = await nearbyFromOverpass(lat, lon); }
@@ -451,9 +470,11 @@ async function loadNearby(onStatus = () => {}) {
     }
   }
   const seen = new Set();
+  const maxDist = state.settings.radius * 1.05;
   nearbyPlaces = raw
     .filter((p) => p.name && p.lat != null && !seen.has(p.name) && seen.add(p.name))
     .map((p) => ({ ...p, dist: Math.round(distance(lat, lon, p.lat, p.lon)), cat: guessCategory(p.name, p.cuisine) }))
+    .filter((p) => p.dist <= maxDist)
     .sort((a, b) => a.dist - b.dist);
   nearbyRandom = null;
   renderNearby();
