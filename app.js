@@ -9,7 +9,7 @@ const defaultState = () => ({
   customCategories: [],   // 自訂類型
   places: [],             // 口袋名單 { id, name, categoryId, price, note, status: "want" | "been", url }
   logs: [],               // 飲食紀錄 { id, ts, name, emoji, categoryId, placeId }
-  settings: { source: "nearby", budget: 300, avoidDays: 3, radius: 800, hideVisited: true, onlyWant: false },
+  settings: { source: "nearby", budget: 300, avoidDays: 3, radius: 800, hideVisited: true, onlyWant: false, nearbyFine: true },
 });
 
 function loadState() {
@@ -263,7 +263,7 @@ function renderPick() {
         return `<div class="card" data-key="${esc(x.key)}">
           <div class="card-head">
             <div class="card-emoji">${esc(c.emoji)}</div>
-            <div class="card-title">${esc(c.name)}<div class="card-meta">${PRICE_LABEL[c.price]} · ${daysAgoText(x.last)}</div></div>
+            <div class="card-title">${esc(c.name)}<div class="card-meta">${priceTag(c.price)} · ${daysAgoText(x.last)}</div></div>
             <button class="card-close" data-act="reject" aria-label="不想吃">✕</button>
           </div>
           <div class="card-btns">
@@ -278,7 +278,7 @@ function renderPick() {
       return `<div class="card" data-key="${esc(x.key)}">
         <div class="card-head">
           <div class="card-emoji">${esc(c?.emoji || "🍽️")}</div>
-          <div class="card-title">${esc(p.name)}${x.want ? '<span class="badge">想吃</span>' : ""}<div class="card-meta">${esc(c?.name || "未分類")} · ${PRICE_LABEL[p.price]} · ${daysAgoText(x.last)}${p.note ? " · " + esc(p.note) : ""}</div></div>
+          <div class="card-title">${esc(p.name)}${x.want ? '<span class="badge">想吃</span>' : ""}<div class="card-meta">${esc(c?.name || "未分類")} · ${priceTag(p.price)} · ${daysAgoText(x.last)}${p.note ? " · " + esc(p.note) : ""}</div></div>
           <button class="card-close" data-act="reject" aria-label="不想吃">✕</button>
         </div>
         <div class="card-btns">
@@ -446,22 +446,31 @@ function mergeSources(google, osm) {
   return out;
 }
 
-async function loadNearby(onStatus = () => {}) {
+let nearbyRawCache = null; // 上次 Google 查到的原始結果
+
+async function loadNearby(onStatus = () => {}, { force = false } = {}) {
+  if (force) nearbyRawCache = null;
   onStatus("📡 定位中…");
   const pos = await getPosition();
   const { latitude: lat, longitude: lon } = pos.coords;
   lastPosition = { latitude: lat, longitude: lon };
   onStatus("🔎 搜尋附近的店…");
   let raw = null, googleErr = null;
-  if (hasGoogleKey()) {
+  // 15 分鐘內在差不多的位置（150m 內）、同樣範圍重新定位，直接用上次的結果，省 API 額度
+  const c = nearbyRawCache;
+  if (c && Date.now() - c.ts < 15 * 60 * 1000 && c.radius === state.settings.radius && distance(c.lat, c.lon, lat, lon) < 150) {
+    raw = c.raw;
+  } else if (hasGoogleKey()) {
     // Google 和 OpenStreetMap 同時查，有些巷子裡的小店只有其中一邊有。
     // OpenStreetMap 的伺服器常常很慢，最多等 10 秒，沒回來就算了
     const osm = Promise.race([nearbyFromOverpass(lat, lon), new Promise((r) => setTimeout(() => r([]), 10000))]).catch(() => []);
-    try { raw = await googleNearby(lat, lon, state.settings.radius); }
+    try { raw = await googleNearby(lat, lon, state.settings.radius, { fine: state.settings.nearbyFine }); }
     catch (e) { googleErr = e; console.warn("Google 附近搜尋失敗，改用 OpenStreetMap", e); }
     const osmPlaces = await osm;
-    if (raw) raw = mergeSources(raw, osmPlaces);
-    else if (osmPlaces.length) raw = osmPlaces;
+    if (raw) {
+      raw = mergeSources(raw, osmPlaces);
+      nearbyRawCache = { ts: Date.now(), lat, lon, radius: state.settings.radius, raw };
+    } else if (osmPlaces.length) raw = osmPlaces;
   }
   if (!raw) {
     try { raw = await nearbyFromOverpass(lat, lon); }
@@ -693,7 +702,7 @@ function renderNearby() {
     const cat = nbFilter.cat && ids.includes(nbFilter.cat) ? categoryById(nbFilter.cat) : p.cat || (ids[0] && categoryById(ids[0]));
     const meta = [cat ? cat.name : AMENITY_LABEL[p.amenity] || "餐廳", p.dist + "m"];
     if (!cat && p.cuisine && !p.gid) meta.splice(1, 0, p.cuisine);
-    if (p.tier) meta.push(PRICE_LABEL[p.tier]);
+    if (p.tier || p.priceText) meta.push(priceTag(p.tier, p.priceText));
     const stats = [];
     if (p.rating) stats.push(`<span class="star">★ ${p.rating.toFixed(1)}</span>`);
     if (p.openNow === true) stats.push(`<span class="open">營業中</span>`);
@@ -738,6 +747,11 @@ function updateNearby() {
 }
 
 $("#locate-btn").addEventListener("click", locate);
+$("#nearby-fine").addEventListener("change", (e) => {
+  state.settings.nearbyFine = e.target.checked;
+  nearbyRawCache = null; // 換了精細度，下次定位要重查
+  save();
+});
 $("#nearby-filter").addEventListener("input", (e) => { nbFilter.q = e.target.value.trim(); updateNearby(); });
 // 按 Enter（手機鍵盤的「搜尋」）時用 Google 搜尋附近，找名字裡沒有關鍵字的店
 $("#nearby-filter").addEventListener("keydown", (e) => {
@@ -806,7 +820,7 @@ function renderList() {
       const c = categoryById(p.categoryId);
       return `<button class="list-item" data-id="${esc(p.id)}">
         <span class="li-emoji">${esc(c?.emoji || "🍽️")}</span>
-        <span class="li-main"><div class="li-title">${esc(p.name)}</div><div class="li-sub">${esc(c?.name || "未分類")} · ${PRICE_LABEL[p.price]}${p.note ? " · " + esc(p.note) : ""}</div></span>
+        <span class="li-main"><div class="li-title">${esc(p.name)}</div><div class="li-sub">${esc(c?.name || "未分類")} · ${priceTag(p.price)}${p.note ? " · " + esc(p.note) : ""}</div></span>
         <span class="li-right">${p.status === "want" ? "" : daysAgoText(lastEatenPlace(p))}</span>
       </button>`;
     };
@@ -821,7 +835,7 @@ function renderList() {
       allCategories({ includeHidden: true })
         .map((c) => `<button class="list-item ${c.hidden ? "off" : ""}" data-id="${esc(c.id)}">
           <span class="li-emoji">${esc(c.emoji)}</span>
-          <span class="li-main"><div class="li-title">${esc(c.name)}${c.hidden ? "（已隱藏）" : ""}</div><div class="li-sub">${PRICE_LABEL[c.price]}${c.builtin ? "" : " · 自訂"}</div></span>
+          <span class="li-main"><div class="li-title">${esc(c.name)}${c.hidden ? "（已隱藏）" : ""}</div><div class="li-sub">${priceTag(c.price)}${c.builtin ? "" : " · 自訂"}</div></span>
           <span class="li-right">${daysAgoText(lastEatenCategory(c.id))}</span>
         </button>`)
         .join("");
@@ -1033,6 +1047,7 @@ function initUI() {
   $("#only-want").checked = s.onlyWant;
   $("#only-want-row").classList.toggle("hidden", s.source !== "place");
   $("#nb-radius").value = String(s.radius);
+  $("#nearby-fine").checked = s.nearbyFine;
   renderList();
   renderLog();
 }

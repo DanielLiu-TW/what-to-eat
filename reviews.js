@@ -59,7 +59,7 @@ async function googleSearch(body, fields) {
 
 const PRICE_TIER = { PRICE_LEVEL_INEXPENSIVE: 1, PRICE_LEVEL_MODERATE: 2, PRICE_LEVEL_EXPENSIVE: 3, PRICE_LEVEL_VERY_EXPENSIVE: 3 };
 
-// 把 Google 的價位換成 App 的 $ / $$ / $$$
+// 把 Google 的價位換成 App 的三個等級（150 元內 / 150–350 元 / 350 元以上）
 function googleTier(g) {
   const start = Number(g.priceRange?.startPrice?.units);
   if (start) return start < 150 ? 1 : start < 350 ? 2 : 3;
@@ -73,43 +73,76 @@ function googleCuisine(type) {
 }
 
 // Google 一次最多回 20 家，而且評論多的店會佔掉名額，巷子裡的小店常常排不進去。
-// 所以把範圍切成 7 個小圈（中間 1 個、周圍 6 個），每圈各抓最近的 20 家，
-// 再加上整個範圍最熱門的 20 家、以及關鍵字「小吃」的搜尋結果
-async function googleNearby(lat, lon, radius) {
-  const centers = [[lat, lon]];
-  const sub = radius >= 400 ? Math.round(radius * 0.5) : radius;
-  if (radius >= 400) {
-    const d = radius * 0.6, kLon = 111320 * Math.cos((lat * Math.PI) / 180);
-    for (let k = 0; k < 6; k++) {
-      const a = (k * Math.PI) / 3;
-      centers.push([lat + (d * Math.cos(a)) / 111320, lon + (d * Math.sin(a)) / kLon]);
-    }
+// 做法：把範圍切成 7 個小圈（中間 1 個、周圍 6 個），每圈各抓最近的 20 家；
+// 某個小圈剛好抓滿 20 家，代表那裡店很密，就再切成 4 個更小的圈（精細模式）。
+// 切細的查詢只抓名稱、位置、類型，Google 這種查詢比較便宜、免費額度也比較多。
+// 另外加上整個範圍最熱門的 20 家，以及關鍵字「小吃」「早餐」的搜尋結果。
+const SUB_CIRCLES_MAX = 28; // 精細模式最多再多查幾次（7 個小圈都很密時剛好全部切完）
+
+// 把一個圓切成 4 塊：四個斜角方向各一個小圓，半徑 0.71 倍剛好蓋滿原本的圓
+function quadsOf(c) {
+  const d = c.r * 0.5, kLon = 111320 * Math.cos((c.lat * Math.PI) / 180), r = Math.round(c.r * 0.71);
+  return [[1, 1], [1, -1], [-1, 1], [-1, -1]].map(([y, x]) => ({
+    lat: c.lat + (y * d * Math.SQRT1_2) / 111320,
+    lon: c.lon + (x * d * Math.SQRT1_2) / kLon,
+    r,
+  }));
+}
+
+function ringOf(lat, lon, r) {
+  const sub = Math.round(r * 0.5), d = r * 0.6, kLon = 111320 * Math.cos((lat * Math.PI) / 180);
+  const out = [{ lat, lon, r: sub }];
+  for (let k = 0; k < 6; k++) {
+    const a = (k * Math.PI) / 3;
+    out.push({ lat: lat + (d * Math.cos(a)) / 111320, lon: lon + (d * Math.sin(a)) / kLon, r: sub });
   }
-  const jobs = [
+  return out;
+}
+
+async function googleNearby(lat, lon, radius, { fine = true } = {}) {
+  const circles = radius >= 400 ? ringOf(lat, lon, radius) : [{ lat, lon, r: radius }];
+  const first = await Promise.allSettled([
+    ...circles.map((c) => googleNearbyOnce(c.lat, c.lon, c.r, "DISTANCE")),
     googleNearbyOnce(lat, lon, radius, "POPULARITY"),
-    ...centers.map(([a, b]) => googleNearbyOnce(a, b, sub, "DISTANCE")),
     googleTextNearby("小吃", lat, lon, radius, 2),
-  ];
-  const results = await Promise.allSettled(jobs);
+    googleTextNearby("早餐", lat, lon, radius, 1),
+  ]);
+  let results = first;
+  if (fine) {
+    // 抓滿 20 家的小圈再切成 4 塊
+    const full = circles.filter((c, i) => first[i].status === "fulfilled" && first[i].value.length >= 20 && c.r >= 150);
+    const finer = full.flatMap(quadsOf).slice(0, SUB_CIRCLES_MAX);
+    if (finer.length) results = results.concat(await Promise.allSettled(finer.map((c) => googleNearbyOnce(c.lat, c.lon, c.r, "DISTANCE", { lite: true }))));
+  }
   const ok = results.filter((r) => r.status === "fulfilled").flatMap((r) => r.value);
   if (!ok.length && results.every((r) => r.status === "rejected")) throw results[0].reason;
   return ok;
 }
 
-const NEARBY_TYPES = ["restaurant", "meal_takeaway", "cafe", "fast_food_restaurant", "bakery", "food_court", "meal_delivery"];
-const NEARBY_TYPES_BASIC = ["restaurant", "meal_takeaway", "cafe"];
-let nearbyTypes = NEARBY_TYPES;
+// 台灣很多早餐店、小吃店在 Google 上不是「restaurant」類型，要另外列出來
+const NEARBY_TYPES_LIST = [
+  ["restaurant", "meal_takeaway", "meal_delivery", "cafe", "bakery", "fast_food_restaurant", "food_court",
+   "breakfast_restaurant", "brunch_restaurant", "sandwich_shop", "coffee_shop", "dessert_shop", "tea_house"],
+  ["restaurant", "meal_takeaway", "meal_delivery", "cafe", "bakery", "fast_food_restaurant", "food_court",
+   "breakfast_restaurant", "brunch_restaurant", "sandwich_shop"],
+  ["restaurant", "meal_takeaway", "cafe"],
+];
+let nearbyTypesLevel = 0;
 
-async function googleNearbyOnce(lat, lon, radius, rankPreference) {
+const NEARBY_FIELDS_LITE = "places.id,places.displayName,places.location,places.primaryType,places.formattedAddress,places.googleMapsUri";
+const NEARBY_FIELDS_FULL = NEARBY_FIELDS_LITE + ",places.rating,places.userRatingCount,places.priceLevel,places.priceRange,places.currentOpeningHours.openNow";
+
+async function googleNearbyOnce(lat, lon, radius, rankPreference, { lite = false } = {}) {
+  const level = nearbyTypesLevel;
   const res = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "X-Goog-Api-Key": getKeys().google,
-      "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.primaryType,places.formattedAddress,places.googleMapsUri,places.rating,places.userRatingCount,places.priceLevel,places.priceRange,places.currentOpeningHours.openNow",
+      "X-Goog-FieldMask": lite ? NEARBY_FIELDS_LITE : NEARBY_FIELDS_FULL,
     },
     body: JSON.stringify({
-      includedTypes: nearbyTypes,
+      includedTypes: NEARBY_TYPES_LIST[level],
       maxResultCount: 20,
       rankPreference,
       languageCode: "zh-TW",
@@ -118,10 +151,11 @@ async function googleNearbyOnce(lat, lon, radius, rankPreference) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    // 萬一 Google 不認得某些類型，就退回基本的三種再試一次
-    if (res.status === 400 && nearbyTypes !== NEARBY_TYPES_BASIC) {
-      nearbyTypes = NEARBY_TYPES_BASIC;
-      return googleNearbyOnce(lat, lon, radius, rankPreference);
+    // 萬一 Google 不認得某些類型，就換比較保守的清單再試
+    if (res.status === 400 && /type/i.test(err.error?.message || "") && level < NEARBY_TYPES_LIST.length - 1) {
+      // 同時有好幾個請求失敗時，只降一級
+      if (nearbyTypesLevel === level) nearbyTypesLevel = level + 1;
+      return googleNearbyOnce(lat, lon, radius, rankPreference, { lite });
     }
     throw new Error(err.error?.message || "HTTP " + res.status);
   }
@@ -133,7 +167,7 @@ function mapGooglePlace(g) {
     id: "g:" + g.id, gid: g.id,
     name: g.displayName?.text, lat: g.location?.latitude, lon: g.location?.longitude,
     cuisine: googleCuisine(g.primaryType), amenity: "restaurant", addr: g.formattedAddress || "",
-    rating: g.rating, count: g.userRatingCount, tier: googleTier(g), mapsUrl: g.googleMapsUri,
+    rating: g.rating, count: g.userRatingCount, tier: googleTier(g), priceText: googleRangeText(g.priceRange), mapsUrl: g.googleMapsUri,
     openNow: g.currentOpeningHours?.openNow,
   };
 }
@@ -380,18 +414,15 @@ function getPlaceInfo(p) {
 }
 
 // ---------- 畫面 ----------
-const PRICE_LEVEL = {
-  PRICE_LEVEL_FREE: "免費", PRICE_LEVEL_INEXPENSIVE: "$", PRICE_LEVEL_MODERATE: "$$",
-  PRICE_LEVEL_EXPENSIVE: "$$$", PRICE_LEVEL_VERY_EXPENSIVE: "$$$$",
-};
+// Google 的實際價格區間，例如「200–400 元」
+function googleRangeText(r) {
+  if (!r?.startPrice?.units) return "";
+  return r.endPrice?.units ? `${r.startPrice.units}–${r.endPrice.units} 元` : `${r.startPrice.units} 元以上`;
+}
 
 function priceText(info) {
-  const r = info.priceRange;
-  if (r?.startPrice?.units) {
-    const end = r.endPrice?.units ? `–${r.endPrice.units}` : "+";
-    return `NT$${r.startPrice.units}${end}`;
-  }
-  return PRICE_LEVEL[info.priceLevel] || "";
+  if (info.priceLevel === "PRICE_LEVEL_FREE") return "💰 免費";
+  return priceTag(googleTier(info), googleRangeText(info.priceRange));
 }
 
 function dateText(d) {

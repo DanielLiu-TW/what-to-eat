@@ -82,8 +82,8 @@
         </select></span>
         <span class="chip chip-select"><select id="nb-price" aria-label="價位">
           <option value="0">價位不限</option>
-          <option value="1">$ 平價</option>
-          <option value="2">$$ 以內</option>
+          <option value="1">一人 150 元內</option>
+          <option value="2">一人 350 元內</option>
         </select></span>
         <button class="chip" data-toggle="fresh">沒去過</button>
         <button class="chip" data-toggle="open">營業中</button>
@@ -129,6 +129,11 @@
         <div class="row-actions"><button class="primary" id="save-keys-btn">儲存設定</button></div>
       </div>
       <div class="panel">
+        <div class="field-label">附近搜尋（有 Google key 時）</div>
+        <label class="row-check"><input type="checkbox" id="nearby-fine"> 精細搜尋巷子裡的小店</label>
+        <p class="muted small">店很密的地方會再切成更小的範圍找，比較不會漏掉小吃店和早餐店。一般每次定位約 10 次 Google 查詢；精細模式最多再多 28 次，但多出來的只抓店名和位置，是 Google 比較便宜的查詢。15 分鐘內在同一個地方重新定位不會重查。</p>
+      </div>
+      <div class="panel">
         <div class="field-label">資料備份</div>
         <p class="muted small">資料只存在這支手機的瀏覽器裡，建議偶爾匯出備份。</p>
         <div class="row-actions">
@@ -160,11 +165,11 @@
         </select>
       </label>
       <label id="cat-row">類型<select name="categoryId"></select></label>
-      <label>價位
+      <label>價位（一個人吃一餐）
         <select name="price">
-          <option value="1">$（約 150 以下）</option>
-          <option value="2">$$（約 150–350）</option>
-          <option value="3">$$$（約 350 以上）</option>
+          <option value="1">一人 150 元內</option>
+          <option value="2">一人 150–350 元</option>
+          <option value="3">一人 350 元以上</option>
         </select>
       </label>
       <label id="note-row">備註<input name="note" maxlength="80" placeholder="例如：公司附近、週一公休"></label>

@@ -1,5 +1,5 @@
 // 內建料理類型庫
-// price: 1 = $（約 150 以下）、2 = $$（約 150–350）、3 = $$$（約 350 以上）
+// price：一個人吃一餐大約花多少。1 = 150 元內、2 = 150–350 元、3 = 350 元以上
 // kw: 用來比對附近店名的中文關鍵字；osm: OpenStreetMap 的 cuisine 標籤
 const BUILTIN_CATEGORIES = [
   { id: "beef-noodle", emoji: "🍜", name: "牛肉麵", price: 2, kw: ["牛肉麵", "牛肉"], osm: ["noodle", "beef_noodle"] },
@@ -54,5 +54,10 @@ const BUILTIN_CATEGORIES = [
   { id: "breakfast", emoji: "🥞", name: "台式早餐", price: 1, kw: ["早餐", "蛋餅", "豆漿"], osm: ["breakfast"] },
 ];
 
-const PRICE_LABEL = { 1: "$", 2: "$$", 3: "$$$" };
-const PRICE_HINT = { 1: "約 150 以下", 2: "約 150–350", 3: "約 350 以上" };
+const PRICE_LABEL = { 1: "150 元內", 2: "150–350 元", 3: "350 元以上" };
+
+// 價格標示：有 Google 的實際價格區間就直接用，沒有就用分級換算的大約金額
+function priceTag(tier, exact) {
+  if (exact) return `💰 ${exact}`;
+  return tier ? `💰 約 ${PRICE_LABEL[tier]}` : "";
+}
